@@ -56,13 +56,12 @@ contKindTyCon = mkKindTyCon contKindTyConName superKind
 -- appear in Core anyway.
 contTyCon = mkPrimTyCon contTyConName (mkArrowKind openTypeKind contKind) [Representational] VoidRep
 
-contFunTyCon = mkSynTyCon contFunTyConName kind vars roles rhs parent
+contFunTyCon = mkSynonymTyCon contFunTyConName kind vars roles rhs
   where
     kind = mkArrowKinds [openTypeKind, openTypeKind] liftedTypeKind
     vars = [openAlphaTyVar, openBetaTyVar]
     roles = [Representational, Representational]
-    rhs = SynonymTyCon (mkFunTy openAlphaTy openBetaTy)
-    parent = NoParentTyCon
+    rhs = mkFunTy openAlphaTy openBetaTy
 
 contKind :: Kind
 contKind = mkTyConApp contKindTyCon []

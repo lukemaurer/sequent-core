@@ -86,7 +86,6 @@ import Language.SequentCore.Syntax
 import Language.SequentCore.Translate
 
 import CoreMonad  ( CoreM
-                  , Plugin(installCoreToDos), defaultPlugin
                   , errorMsg, putMsg
                   , reinitializeGlobals
                   , CoreToDo(CoreDoSpecConstr, CoreDoPasses, CoreDoPluginPass) )
@@ -97,15 +96,16 @@ import FastString ( fsLit, mkFastString )
 import Id         ( Id, mkSysLocalM, idName, idInlineActivation )
 import Name       ( nameOccName, occNameString )
 import Outputable hiding ((<>))
+import Plugins    ( Plugin(installCoreToDos), defaultPlugin )
 import Rules      ( mkRule, addIdSpecialisations )
 import Var        ( Var, varType )
 import VarEnv
 import VarSet
 
-import Control.Applicative  ( (<$>), (<|>) )
+import Control.Applicative  ( (<|>) )
 import Control.Monad
 import Data.List            ( nubBy )
-import Data.Monoid
+import Data.Monoid hiding   ( Alt )
 
 tracing :: Bool
 tracing = False
@@ -403,7 +403,7 @@ specialize env (ScUsage calls used) (x, v)
     callToPat :: Call -> CoreM CallPat
     callToPat args
       = do
-        (varss, rhss) <- unzip `liftM` zipWithM argToSubpat binders args
+        (varss, rhss) <- unzip <$> zipWithM argToSubpat binders args
         return $ concat varss :-> rhss
 
     -- | Given an argument to the call, abstract over it to produce part of a

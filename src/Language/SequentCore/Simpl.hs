@@ -24,8 +24,8 @@ import Language.SequentCore.WiredIn
 
 import BasicTypes
 import Coercion    ( Coercion, isCoVar )
-import CoreMonad   ( Plugin(..), SimplifierMode(..), Tick(..), CoreToDo(..),
-                     CoreM, defaultPlugin, reinitializeGlobals,
+import CoreMonad   ( SimplifierMode(..), Tick(..), CoreToDo(..),
+                     CoreM, reinitializeGlobals,
                      isZeroSimplCount, pprSimplCount, putMsg, errorMsg
                    )
 import CoreSyn     ( isRuntimeVar, isCheapUnfolding )
@@ -39,6 +39,7 @@ import MkCore      ( mkWildValBinder )
 import MonadUtils  ( mapAccumLM )
 import OccurAnal   ( occurAnalysePgm )
 import Outputable
+import Plugins     ( Plugin(..), defaultPlugin )
 import Type        ( applyTys, isUnLiftedType, mkTyVarTy, splitFunTys )
 import Var
 import VarEnv
@@ -749,10 +750,10 @@ noSizeIncrease _rhs _cont = False --TODO
 
 smallEnough :: SimplEnv -> OutValue -> Guidance -> InCont -> Bool
 smallEnough _ _ Never _ = False
-smallEnough _ val (Usually unsatOk boringOk) cont
+smallEnough _ _val (Usually unsatOk boringOk arity) cont
   = (unsatOk || unsat) && (boringOk || boring)
   where
-    unsat = length valArgs < valueArity val
+    unsat = length valArgs < arity
     (_, valArgs, _) = collectTypeAndOtherArgs cont
     boring = isReturnCont cont -- FIXME Not all returns are boring! Also, in
                                -- fact, some non-returns *are* boring (a cast

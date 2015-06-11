@@ -25,7 +25,7 @@ import Language.SequentCore.Simpl.ExprSize
 import Language.SequentCore.Syntax
 import Language.SequentCore.Translate
 
-import BasicTypes ( TopLevelFlag(..), RecFlag(..)
+import BasicTypes ( Arity, TopLevelFlag(..), RecFlag(..)
                   , isTopLevel, isNotTopLevel, isNonRec )
 import Coercion   ( Coercion, CvSubstEnv, CvSubst(..), isCoVar )
 import qualified Coercion
@@ -88,8 +88,9 @@ data Definition
 data Guidance
   = Never
   | Usually   { guEvenIfUnsat :: Bool
-              , guEvenIfBoring :: Bool } -- currently only used when translated
-                                         -- from a Core unfolding
+              , guEvenIfBoring :: Bool
+              , guArity :: Arity } -- currently only used when translated
+                                   -- from a Core unfolding
   | Sometimes { guSize :: Int
               , guArgDiscounts :: [Int]
               , guResultDiscount :: Int }
@@ -444,8 +445,8 @@ unfoldingToDef unf@(DFunUnfolding {})
 
 unfGuidanceToGuidance :: UnfoldingGuidance -> Guidance
 unfGuidanceToGuidance UnfNever = Never
-unfGuidanceToGuidance (UnfWhen { ug_unsat_ok = unsat , ug_boring_ok = boring })
-  = Usually { guEvenIfUnsat = unsat , guEvenIfBoring = boring }
+unfGuidanceToGuidance (UnfWhen { ug_unsat_ok = unsat, ug_boring_ok = boring, ug_arity = arity })
+  = Usually { guEvenIfUnsat = unsat, guEvenIfBoring = boring, guArity = arity }
 unfGuidanceToGuidance (UnfIfGoodArgs { ug_args = args, ug_size = size, ug_res = res })
   = Sometimes { guSize = size, guArgDiscounts = args, guResultDiscount = res }
 
@@ -465,14 +466,14 @@ defToUnfolding (BoundTo { defValue = Cont {} })
   = NoUnfolding -- TODO Can we do better? Translating requires knowing the outer linear cont.
 defToUnfolding (BoundTo { defValue = val, defLevel = lev, defGuidance = guid })
   = mkCoreUnfolding InlineRhs (isTopLevel lev) (valueToCoreExpr val)
-      (valueArity val) (guidanceToUnfGuidance guid)
+      (guidanceToUnfGuidance guid)
 defToUnfolding (BoundToDFun { dfunBndrs = bndrs, dfunDataCon = con, dfunArgs = args})
   = mkDFunUnfolding bndrs con (map valueToCoreExpr args)
 
 guidanceToUnfGuidance :: Guidance -> UnfoldingGuidance
 guidanceToUnfGuidance Never = UnfNever
-guidanceToUnfGuidance (Usually { guEvenIfUnsat = unsat, guEvenIfBoring = boring })
-  = UnfWhen { ug_unsat_ok = unsat, ug_boring_ok = boring }
+guidanceToUnfGuidance (Usually { guEvenIfUnsat = unsat, guEvenIfBoring = boring, guArity = arity })
+  = UnfWhen { ug_unsat_ok = unsat, ug_boring_ok = boring, ug_arity = arity }
 guidanceToUnfGuidance (Sometimes { guSize = size, guArgDiscounts = args, guResultDiscount = res})
   = UnfIfGoodArgs { ug_size = size, ug_args = args, ug_res = res }
 
@@ -541,10 +542,11 @@ instance Outputable Definition where
 
 instance Outputable Guidance where
   ppr Never = text "Never"
-  ppr (Usually unsatOk boringOk)
+  ppr (Usually unsatOk boringOk arity)
     = text "Usually" <+> brackets (hsep $ punctuate comma $ catMaybes
                                     [if unsatOk then Just (text "even if unsat") else Nothing,
                                      if boringOk then Just (text "even if boring cxt") else Nothing])
+                     <+> brackets (text "arity:" <> int arity)
   ppr (Sometimes base argDiscs resDisc)
     = text "Sometimes" <+> brackets (int base <+> ppr argDiscs <+> int resDisc)
 

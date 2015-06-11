@@ -8,7 +8,6 @@ import DynFlags  ( HasDynFlags(..) )
 import Outputable
 import UniqSupply
 
-import Control.Applicative
 import Control.Monad
 import Control.Monad.IO.Class
 

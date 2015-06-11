@@ -224,7 +224,7 @@ bodySize dflags cap topArgs expr
 
 -- Lifted from CoreUnfold
 litSize :: Literal -> Int
-litSize (LitInteger {}) = 100	-- Note [Size of literal integers]
+litSize (LitInteger {}) = 100 -- Note [Size of literal integers]
 litSize (MachStr str)   = 10 + 10 * ((BS.length str + 3) `div` 4)
   -- If size could be 0 then @f "x"@ might be too small
   -- [Sept03: make literal strings a bit bigger to avoid fruitless 
@@ -249,7 +249,7 @@ classOpSize dflags top_args (arg1 : other_args)
                      Var dict | dict `elem` top_args 
                               -> unitBag (dict, ufDictDiscount dflags)
                      _other   -> emptyBag
-    		     
+
 -- Lifted from CoreUnfold
 funSize :: DynFlags -> [Id] -> Id -> Int -> Int -> BodySize
 -- Size for functions that are not constructors or primops
