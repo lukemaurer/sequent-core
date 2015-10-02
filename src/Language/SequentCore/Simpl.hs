@@ -1006,7 +1006,7 @@ simplTermInNormCommand env_v dsc (Var x) fs end
                                                 lone fs end
            case term'_maybe of
              Nothing
-               -> simplTermInCommandDone env_v dsc (Var x') fs end
+               -> simplTermInCommandDone env_v (Var x') fs end
              Just term'
                -> do
                   tick (UnfoldingDone x')
@@ -1038,12 +1038,15 @@ simplTermInNormCommand env_v dsc (Compute ty c) fs end
                                                     , mk_frames = fs
                                                     , mk_end    = end }
     simplCommand env_v' dsc csc' c
-simplTermInNormCommand env _dsc (Coercion co) (f : fs) end
-  | (dsc', Cast coCo) <- openScoped f
-  = let co' = simplOutCoercion (mkCoCast coCo co) in
-    simplTermInCommandDone env dsc' (Coercion co') fs end
-simplTermInNormCommand env_v dsc v@(Coercion _) fs end
-  = simplTermInCommandDone env_v dsc v fs end
+simplTermInNormCommand env dsc (Coercion co) (f : fs) end
+  | (dsc_coCo, Cast coCo) <- openScoped f
+  = let co_out   = substCo env dsc      co
+        coCo_out = substCo env dsc_coCo coCo
+        co'      = simplOutCoercion (mkCoCast coCo_out co_out) in
+    simplTermInCommandDone env (Coercion co') fs end
+simplTermInNormCommand env_v dsc (Coercion co) fs end
+  = let co' = simplCoercion env_v dsc co in
+    simplTermInCommandDone env_v (Coercion co') fs end
 simplTermInNormCommand env_v dsc v@(Lam x body) (f : fs) end
   -- discard a non-counting tick on a lambda.  This may change the
   -- cost attribution slightly (moving the allocation of the
@@ -1074,16 +1077,16 @@ simplTermInNormCommand env_v dsc term@(Lam {}) fs end
         (env_v', dsc', xs') = enterLamScopes env_v dsc xs
     body' <- simplTermNoFloats env_v' dsc' BoringCtxt body
     term' <- mkLam env_v xs' body'
-    simplTermInCommandDone env_v dsc term' fs end
-simplTermInNormCommand env_v dsc term@(Lit {}) fs end
-  = simplTermInCommandDone env_v dsc term fs end
+    simplTermInCommandDone env_v term' fs end
+simplTermInNormCommand env_v _dsc term@(Lit {}) fs end
+  = simplTermInCommandDone env_v term fs end
 
-simplTermInCommandDone :: SimplEnv -> DataScope -> OutTerm
+simplTermInCommandDone :: SimplEnv -> OutTerm
                        -> [ScopedFrame] -> ScopedEnd
                        -> SimplM (Floats, OutCommand)
 
-simplTermInCommandDone env_v dsc v fs end
-  = simplKont env_v dsc (mkArgInfo env_v v fs end) fs end
+simplTermInCommandDone env_v v fs end
+  = simplKont env_v (mkArgInfo env_v v fs end) fs end
 
 {-
 Note [simplKont invariants]
@@ -1104,21 +1107,11 @@ As a jump has a very specific form, case 2 has some invariants:
   - The end is a Return
 -}
 
--- TODO Get rid of DataScope argument??
 simplKont :: SimplEnv 
-          -> DataScope    -- No continuation bindings! We'll end up using the
-                          -- ones in the ScopedEnd (frames are also
-                          -- continuation-closed).
           -> ArgInfo
           -> [ScopedFrame] -> ScopedEnd
           -> SimplM (Floats, OutCommand)
-simplKont env dsc ai fs end
-  | tracing
-  , pprTraceShort "simplKont" (
-      ppr env $$ ppr dsc $$ ppr ai $$ pprMultiScopedKont fs end
-    ) False
-  = undefined
-simplKont env dsc (ai@ArgInfo { ai_strs = [] }) fs end
+simplKont env (ai@ArgInfo { ai_strs = [] }) fs end
   -- We've run out of strictness arguments, meaning the call is definitely bottom
   | hasTerm
   , not trivialKont -- Don't bother throwing away a trivial continuation
@@ -1128,7 +1121,7 @@ simplKont env dsc (ai@ArgInfo { ai_strs = [] }) fs end
   = warnPprTrace (not hasTerm) __FILE__ __LINE__
       (hang (text "Join point bottoms out at less than apparent arity:") 2
             (ppr ai $$ pprMultiScopedKont fs end)) $
-    simplKont env dsc (ai { ai_strs = [False] }) fs end
+    simplKont env (ai { ai_strs = [False] }) fs end
   where
     trivialKont | null fs
                 , ((_, csc), Return) <- openScoped end
@@ -1140,28 +1133,34 @@ simplKont env dsc (ai@ArgInfo { ai_strs = [] }) fs end
     hasTerm = argInfoHasTerm ai
     term = argInfoToTerm ai
     ty = termType term
-simplKont env dsc ai (Simplified _ _ f : fs) end
-  = simplKont env dsc (addFrameToArgInfo ai f) fs end
-simplKont env _dsc ai (f : fs) end
+simplKont env ai (Simplified _ _ f : fs) end
+  = simplKont env (addFrameToArgInfo ai f) fs end
+simplKont env ai (f : fs) end
   = case openScoped f of
       (dsc', f') -> simplKontFrame env dsc' ai f' fs end
-simplKont env _dsc ai [] end
+simplKont env ai [] end
   = case openScoped end of
       ((dsc', csc), end') -> simplKontEnd env dsc' csc ai end'
 
 simplKontFrame :: SimplEnv -> DataScope -> ArgInfo
                -> InFrame -> [ScopedFrame] -> ScopedEnd
                -> SimplM (Floats, OutCommand)
+simplKontFrame env dsc ai f fs end
+  | tracing
+  , pprTraceShort "simplKontFrame" (
+      ppr env $$ ppr dsc $$ ppr ai $$ ppr f $$ pprMultiScopedKont fs end
+    ) False
+  = undefined
 simplKontFrame env dsc ai (Cast co) fs end
   -- Since the frames were already normalized, we know there's nothing clever to
   -- do here
-  = simplKont env dsc (addFrameToArgInfo ai (Cast co')) fs end
+  = simplKont env (addFrameToArgInfo ai (Cast co')) fs end
   where
     co' = simplCoercion env dsc co
 simplKontFrame env dsc ai (App (Type tyArg)) fs end
   = do
     let ty' = substTy env dsc tyArg
-    simplKont env dsc (addFrameToArgInfo ai (App (Type ty'))) fs end
+    simplKont env (addFrameToArgInfo ai (App (Type ty'))) fs end
 simplKontFrame _ _ (ArgInfo { ai_discs = [] }) _ _ _
   = pprPanic "simplKontFrame" (text "out of discounts??")
 simplKontFrame _ _ ai@(ArgInfo { ai_strs = [] }) f _ _
@@ -1186,20 +1185,26 @@ simplKontFrame env dsc ai@(ArgInfo { ai_strs = str:_
   = do
     -- Don't float out of lazy arguments (see Simplify.rebuildCall)
     arg_final <- simplTermNoFloats env dsc cci arg
-    simplKont env dsc (addFrameToArgInfo ai (App arg_final)) fs end
+    simplKont env (addFrameToArgInfo ai (App arg_final)) fs end
   where
     cci | ai_encl ai = RuleArgCtxt
         | disc > 0   = DiscArgCtxt
         | otherwise  = BoringCtxt
-simplKontFrame env dsc ai (f@(Tick _)) fs end
+simplKontFrame env _dsc ai f@(Tick _) fs end
   -- FIXME Tick handling is actually rather delicate! In fact, we should
   -- (somehow) be putting a float barrier here (see Simplify.simplTick).
-  = simplKont env dsc (addFrameToArgInfo ai f) fs end
+  = simplKont env (addFrameToArgInfo ai f) fs end
 
 simplKontEnd :: SimplEnv -> DataScope -> ControlScope
              -> ArgInfo
              -> InEnd
              -> SimplM (Floats, OutCommand)
+simplKontEnd env dsc csc ai e
+  | tracing
+  , pprTraceShort "simplKontEnd" (
+      ppr env $$ ppr dsc $$ ppr csc $$ ppr ai $$ ppr e
+    ) False
+  = undefined
 {-
 If simplifying a Jump, rules cannot apply, there cannot be a coercion, the end
 must be Return, and the metacontinuation will not be invoked (it is only invoked
@@ -1342,7 +1347,7 @@ invokeMetaKont env dsc csc term
                       , mk_frames = fs
                       , mk_end = end
                       , mk_context = ctxt })
-        -> simplKont (env `setContext` ctxt) dsc
+        -> simplKont (env `setContext` ctxt)
                      (addFrameToArgInfo ai' (App term)) fs end
       Just (StrictLet { mk_scope = (dsc_outer, csc_outer)
                       , mk_binder = bndr
@@ -1395,7 +1400,7 @@ simplJump env dsc csc args j
           
            case rhs'_maybe of
              Nothing
-               -> simplKont env dsc (mkJumpArgInfo env j' frames) frames end
+               -> simplKont env (mkJumpArgInfo env j' frames) frames end
                     -- Activate case 2 of simplKont (Note [simplKont invariants])
              Just join'
                -> do
@@ -1410,7 +1415,7 @@ simplJump env dsc csc args j
     frames = map (Incoming dsc . App) args
     end    = Simplified OkToDup Nothing Return
     reduce env_join dsc_join csc_join join
-      = simplKont env_join dsc_join 
+      = simplKont env_join
                   (mkJoinArgInfo env_join (Incoming (dsc_join, csc_join) join) frames)
                   frames end
     
