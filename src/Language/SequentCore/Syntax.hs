@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase, FlexibleInstances, TypeSynonymInstances #-}
 
 -- | 
 -- Module      : Language.SequentCore.Syntax

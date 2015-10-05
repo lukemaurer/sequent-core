@@ -24,7 +24,6 @@ import Language.SequentCore.WiredIn
 import BasicTypes ( Arity, RecFlag(..), TopLevelFlag(..), TupleSort(..)
                   , isNonRec, isNotTopLevel )
 import CoreSubst
-import CoreSyn   ( Unfolding(..), UnfoldingGuidance(..) )
 import CoreUnfold
 import qualified CoreSyn as Core
 import qualified CoreUtils as Core
@@ -697,7 +696,7 @@ tweakUnfolding :: Id -> KontCallConv -> Id
 tweakUnfolding id (ByJump descs)
   = case unf of
       Core.CoreUnfolding {} ->
-        let expr = uf_tmpl unf
+        let expr = Core.uf_tmpl unf
             env = initFromCoreEnvForExpr expr
             (env', bndrs, body) = etaExpandForJoinBody env descs expr
             bndrs' | noValArgs = bndrs ++ [voidPrimId]
@@ -705,8 +704,8 @@ tweakUnfolding id (ByJump descs)
             expr' = substExpr (text "tweakUnfolding") (fce_subst env') (Core.mkLams bndrs' body)
             arity' = valArgCount `min` 1
         in id `setIdUnfolding`
-             mkCoreUnfolding (uf_src unf) (uf_is_top unf) (simpleOptExpr expr')
-                             arity' (fixGuid (uf_guidance unf))
+             mkCoreUnfolding (Core.uf_src unf) (Core.uf_is_top unf) (simpleOptExpr expr')
+                             arity' (fixGuid (Core.uf_guidance unf))
       _ -> id
   where
     unf = realIdUnfolding id
@@ -717,11 +716,11 @@ tweakUnfolding id (ByJump descs)
     valArgCount = count isValArgDesc descs
     noValArgs = valArgCount == 0
     
-    fixGuid guid@(UnfIfGoodArgs { ug_args = args })
+    fixGuid guid@(Core.UnfIfGoodArgs { Core.ug_args = args })
       | noValArgs
-      = guid { ug_args = [0] } -- We keep a single Void# lambda in the unfolding
+      = guid { Core.ug_args = [0] } -- We keep a single Void# lambda in the unfolding
       | otherwise
-      = guid { ug_args = fixArgs args descs }
+      = guid { Core.ug_args = fixArgs args descs }
     fixGuid guid = guid
     
     fixArgs [] [] = []

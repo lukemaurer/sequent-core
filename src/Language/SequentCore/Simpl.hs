@@ -34,11 +34,11 @@ import CoreMonad   ( Plugin(..), SimplifierMode(..), Tick(..), CoreToDo(..),
                      putMsg,
                      getHscEnv, getRuleBase
                    )
-import CoreSyn     ( CoreVect(..), CoreRule(..), UnfoldingSource(..)
+import CoreSyn     ( CoreVect(..), CoreRule, UnfoldingSource(..)
                    , evaldUnfolding
                    , isRuntimeVar, isStableSource, isStableUnfolding
                    , tickishCounts
-                   , ruleArity )
+                   , ruleArity, ruleName )
 import DataCon
 import Demand      ( StrictSig(..), dmdTypeDepth )
 import DynFlags    ( DynFlags, DumpFlag(..), GeneralFlag(..)
@@ -1644,7 +1644,7 @@ tryRules env rules fn args
                          (activeRule env) fn coreArgs rules of {
            Nothing               -> return Nothing ;   -- No rule matches
            Just (rule, rule_rhs) ->
-             do { checkedTick (RuleFired (ru_name rule))
+             do { checkedTick (RuleFired (ruleName rule))
                 ; dump dflags rule rule_rhs
                 ; let term' = termFromCoreExpr rule_rhs
                 ; let extraArgs = drop (ruleArity rule) args
@@ -1657,14 +1657,14 @@ tryRules env rules fn args
     dump dflags rule rule_rhs
       | dopt Opt_D_dump_rule_rewrites dflags
       = log_rule dflags Opt_D_dump_rule_rewrites "Rule fired" $ vcat
-          [ text "Rule:" <+> ftext (ru_name rule)
+          [ text "Rule:" <+> ftext (ruleName rule)
           , text "Before:" <+> hang (ppr fn) 2 (sep (map ppr $ take arity args))
           , text "After: " <+> ppr rule_rhs
           , text "Cont:  " <+> pprCoreKont (map App $ drop arity args, Return) ]
 
       | dopt Opt_D_dump_rule_firings dflags
       = log_rule dflags Opt_D_dump_rule_firings "Rule fired:" $
-          ftext (ru_name rule)
+          ftext (ruleName rule)
 
       | otherwise
       = return ()

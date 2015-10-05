@@ -85,7 +85,7 @@ import qualified Coercion
 import CoreMonad  ( SimplifierMode(..) )
 import qualified CoreSubst
 import CoreSyn    ( Tickish(Breakpoint)
-                  , Unfolding(..), UnfoldingGuidance(..), UnfoldingSource(..)
+                  , UnfoldingGuidance(..), UnfoldingSource(..)
                   , hasSomeUnfolding, isCompulsoryUnfolding, isStableSource, mkOtherCon
                   , tickishCounts, tickishIsCode )
 import qualified CoreSyn as Core
@@ -1309,7 +1309,7 @@ hasNoKontFloats = foldrOL (&&) True . mapOL (all bindsTerm . flattenBind)
 -- Definitions (continued) --
 -----------------------------
 
-findDefBy :: SimplEnv -> OutId -> (Id -> Unfolding) -> Definition
+findDefBy :: SimplEnv -> OutId -> (Id -> Core.Unfolding) -> Definition
 findDefBy env var id_unf
   | isStrongLoopBreaker (idOccInfo var)
   = NoDefinition
@@ -1329,7 +1329,7 @@ expandTermDef_maybe (BoundToTerm { def_isExpandable = True, def_term = term }) =
 expandTermDef_maybe def@(BoundToJoin {}) = pprPanic "expandTermDef_maybe" (ppr def)
 expandTermDef_maybe _ = Nothing
 
-getUnfoldingInRuleMatch :: SimplEnv -> (Id -> Unfolding)
+getUnfoldingInRuleMatch :: SimplEnv -> (Id -> Core.Unfolding)
 -- When matching in RULE, we want to "look through" an unfolding
 -- (to see a constructor) if *rules* are on, even if *inlinings*
 -- are not.  A notable example is DFuns, which really we want to
@@ -1341,30 +1341,30 @@ getUnfoldingInRuleMatch env
   where
     mode = getMode env
     id_unf id | unf_is_active id = idUnfolding id
-              | otherwise        = NoUnfolding
+              | otherwise        = Core.NoUnfolding
     unf_is_active id
      | not (sm_rules mode) = active_unfolding_minimal id
      | otherwise           = isActive (sm_phase mode) (idInlineActivation id)
 
-unfoldingToDef :: Var -> Unfolding -> Definition
+unfoldingToDef :: Var -> Core.Unfolding -> Definition
 unfoldingToDef var _ | isJoinId var = NoDefinition -- Can't translate a join in isolation
-unfoldingToDef _ NoUnfolding     = NoDefinition
-unfoldingToDef _ (OtherCon cons) = NotAmong cons
-unfoldingToDef _ unf@(CoreUnfolding {})
-  = BoundToTerm { def_term         = termFromCoreExpr (uf_tmpl unf)
-                , def_src          = uf_src unf
-                , def_level        = if uf_is_top unf then TopLevel else NotTopLevel
-                , def_guidance     = uf_guidance unf
-                , def_arity        = uf_arity unf
-                , def_isValue      = uf_is_value unf
-                , def_isConLike    = uf_is_conlike unf
-                , def_isWorkFree   = uf_is_work_free unf
-                , def_isExpandable = uf_expandable unf }
-unfoldingToDef _ unf@(DFunUnfolding {})
-  = BoundToDFun { dfun_bndrs    = df_bndrs unf
-                , dfun_dataCon  = df_con unf
+unfoldingToDef _ Core.NoUnfolding     = NoDefinition
+unfoldingToDef _ (Core.OtherCon cons) = NotAmong cons
+unfoldingToDef _ unf@(Core.CoreUnfolding {})
+  = BoundToTerm { def_term         = termFromCoreExpr (Core.uf_tmpl unf)
+                , def_src          = Core.uf_src unf
+                , def_level        = if Core.uf_is_top unf then TopLevel else NotTopLevel
+                , def_guidance     = Core.uf_guidance unf
+                , def_arity        = Core.uf_arity unf
+                , def_isValue      = Core.uf_is_value unf
+                , def_isConLike    = Core.uf_is_conlike unf
+                , def_isWorkFree   = Core.uf_is_work_free unf
+                , def_isExpandable = Core.uf_expandable unf }
+unfoldingToDef _ unf@(Core.DFunUnfolding {})
+  = BoundToDFun { dfun_bndrs    = Core.df_bndrs unf
+                , dfun_dataCon  = Core.df_con unf
                 , dfun_args     = map (occurAnalyseTerm . termFromCoreExpr)
-                                      (df_args unf) }
+                                      (Core.df_args unf) }
 
 setDef :: SimplEnv -> OutId -> Definition -> (SimplEnv, OutId)
 setDef env x def
@@ -1374,11 +1374,11 @@ setDef env x def
                , se_defs    = extendVarEnv (se_defs env) x' def }
     x'   = x `setIdUnfolding` defToUnfolding def
 
-defToUnfolding :: Definition -> Unfolding
-defToUnfolding NoDefinition    = NoUnfolding
+defToUnfolding :: Definition -> Core.Unfolding
+defToUnfolding NoDefinition    = Core.NoUnfolding
 defToUnfolding (NotAmong cons) = mkOtherCon cons
 defToUnfolding (BoundToJoin { def_join = _join })
-  = NoUnfolding -- TODO Can we do better? Translating requires knowing the outer linear cont.
+  = Core.NoUnfolding -- TODO Can we do better? Translating requires knowing the outer linear cont.
 defToUnfolding (BoundToTerm { def_src = src, def_term = term, def_level = lev, def_guidance = guid })
   = mkCoreUnfolding src (isTopLevel lev) (termToCoreExpr term)
       (termArity term) guid
@@ -1487,7 +1487,7 @@ active_unfolding_gentle id
   where
     prag = idInlinePragma id
 
-termIsConApp_maybe :: SimplEnv -> (Id -> Unfolding) -> OutTerm -> Maybe (DataCon, [OutType], [OutTerm])
+termIsConApp_maybe :: SimplEnv -> (Id -> Core.Unfolding) -> OutTerm -> Maybe (DataCon, [OutType], [OutTerm])
 termIsConApp_maybe env id_unf term
   -- Proceed basically like Simplify.exprIsConApp_maybe, only use the whole
   -- environment rather than a more compact Subst type, since we don't (yet)
