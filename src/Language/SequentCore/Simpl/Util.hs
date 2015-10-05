@@ -103,7 +103,7 @@ mkArgInfo env term@(Var fun) fs end
   | otherwise
   = ArgInfo { ai_target = TermTarget term, ai_frames = []
             , ai_rules = rules
-            , ai_encl  = interestingArgContext env rules (map unScope fs) (unScope end)
+            , ai_encl  = interestingArgContext csc rules (map unScope fs) (unScope end)
             , ai_strs  = add_type_str fun_ty (idArgStrictnesses fun n_val_args)
             , ai_discs = arg_discounts
             , ai_dup   = NoDup }
@@ -111,6 +111,7 @@ mkArgInfo env term@(Var fun) fs end
     fun_ty = idType fun
     n_val_args = count (isValueAppFrame . unScope) fs
     rules = getRules (getSimplRules env) fun
+    (_, csc, _) = openScopedEnd end
 
     vanilla_discounts, arg_discounts :: [Int]
     vanilla_discounts = repeat 0
@@ -315,12 +316,12 @@ nonTriv TrivArg = False
 nonTriv _       = True
 
 -- See comments on SimplUtils.interestingArgContext
-interestingArgContext :: SimplEnv -> [CoreRule] -> [InFrame] -> InEnd -> Bool
-interestingArgContext env rules fs end
+interestingArgContext :: ControlScope -> [CoreRule] -> [InFrame] -> InEnd -> Bool
+interestingArgContext csc rules fs end
   | not (null rules)  = True
   | Case {} <- end    = False
   | any isAppFrame fs = False
-  | RuleArgCtxt <- getContext env
+  | RuleArgCtxt <- getContext csc
                       = True
   | otherwise         = False
 
@@ -730,14 +731,14 @@ all come out in the next pass anyway.
 -------------------------
 
 -- (from SimplUtils)
-mkLam :: SimplEnv -> [OutBndr] -> OutTerm -> SimplM OutTerm
+mkLam :: Bool -> [OutBndr] -> OutTerm -> SimplM OutTerm
 -- mkLam tries two things
 --      a) eta reduction, if that gives a trivial expression
 --      b) eta expansion [only if there are some value lambdas]
 
-mkLam _env [] body
+mkLam _inRhsCtxt [] body
   = return body
-mkLam env bndrs body
+mkLam inRhsCtxt bndrs body
   = do  { dflags <- getDynFlags
         ; mkLam' dflags bndrs body }
   where
@@ -772,9 +773,6 @@ mkLam env bndrs body
 
       | otherwise
       = return (mkLambdas bndrs body)
-      
-    inRhsCtxt | RhsCtxt <- getContext env = True
-              | otherwise                 = False
 
 ---------------
 -- Instances --

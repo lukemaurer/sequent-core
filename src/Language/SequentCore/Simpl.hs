@@ -226,7 +226,7 @@ simplModule env0 binds0
                 -- anything into scope, then we don't get a complaint about that.
                 -- It's rather as if the top-level binders were imported.
                 -- See note [Glomming] in OccurAnal.
-        ; let (env1, dsc, csc, _) = enterRecScopes env0 emptyDataScope emptyControlScope
+        ; let (env1, dsc, csc, _) = enterRecScopes env0 emptyDataScope nullControlScope
                                       (bindersOfBinds binds0)
         ; assert (isEmptyControlScope csc) $ return ()
         ; dflags <- getDynFlags
@@ -251,11 +251,11 @@ simplModule env0 binds0
     trace_bind True  bind = pprTrace "SimplBind" (ppr (bindersOf bind))
     trace_bind False _    = \x -> x
 
-    simpl_bind env dsc (Rec pairs)   = simplRec          env  dsc emptyControlScope pairs TopLevel
-    simpl_bind env dsc (NonRec pair) = simplRecOrTopPair env' dsc emptyControlScope b' pair TopLevel NonRecursive
+    simpl_bind env dsc (Rec pairs)   = simplRec          env  dsc nullControlScope pairs TopLevel
+    simpl_bind env dsc (NonRec pair) = simplRecOrTopPair env' dsc nullControlScope b' pair TopLevel NonRecursive
         where
           b = binderOfPair pair
-          (env', b') = addBndrRules env dsc emptyControlScope b (lookupRecBndr env dsc emptyControlScope b)
+          (env', b') = addBndrRules env dsc nullControlScope b (lookupRecBndr env dsc nullControlScope b)
 
 {-
 simplRec is used for
@@ -299,7 +299,7 @@ simplRecOrTopPair :: SimplEnv -> DataScope -> ControlScope
                   -> SimplM (Floats, SimplEnv, DataScope, ControlScope)
 simplRecOrTopPair env dsc csc new_bndr old_pair top_lvl is_rec
   = do -- Check for unconditional inline
-       preInline <- preInlineUnconditionally env dsc csc old_pair top_lvl
+       preInline <- preInlineUnconditionally env dsc old_pair top_lvl
        if preInline
            then do tick (PreInlineUnconditionally old_bndr)
                    let (dsc', csc') = extendSubstWithInBindPair dsc csc dsc csc old_pair
@@ -367,59 +367,103 @@ simplLazyBind env dsc new_bndr dsc_rhs old_bndr term level recFlag
 
 {-
 simplNonRecInCommand is used for
-  * [simplCommand] non-top-level non-recursive lets in commands
-  * [simplTermInCommand] beta reduction
-  
-These two call sites are different enough to need different metacontinuations
-(StrictLet and StrictLamBind, respectively). Since simplNonRecInCommand doesn't
-know which one called, the caller needs to say what metacontinuation to use in
-case the binding is strict and we tail-recurse into the right-hand side.
+  * [simplCommand] non-recursive lets in commands
 -}
 -- c.f. Simplify.simplNonRecE
 simplNonRecInCommand :: SimplEnv -> DataScope -> ControlScope
                      -> DataScope -> ControlScope -> InBindPair
-                     -> MetaKont
-                        -- ^ MetaKont to recurse with if strict
-                     -> ((SimplEnv, DataScope, ControlScope) -> SimplM (Floats, OutCommand))
-                        -- ^ Continuation to call if lazy or pre-inlined
+                     -> InCommand
                      -> SimplM (Floats, OutCommand)
-simplNonRecInCommand env dsc csc dsc_rhs csc_rhs pair mk_strict _
+simplNonRecInCommand env dsc csc dsc_rhs csc_rhs pair _comm
   | tracing
   , pprTraceShort "simplNonRecInCommand" (ppr env $$ ppr dsc $$ ppr csc $$
                                           ppr (binderOfPair pair) $$
                                           ppr dsc_rhs $$ ppr csc_rhs $$
-                                          ppr pair $$ ppr mk_strict) False
+                                          ppr pair) False
   = undefined
-simplNonRecInCommand env dsc csc dsc_rhs _csc_rhs pair _mk_strict k_lazy
+simplNonRecInCommand env dsc csc dsc_rhs _csc_rhs pair comm
   | BindTerm x (Type ty) <- pair
   = let ty' = substTy env dsc_rhs ty
-    in k_lazy (env, extendTvSubst dsc x ty', csc)
+    in simplCommand env (extendTvSubst dsc x ty') csc comm
   | isTyVar (binderOfPair pair)
   = pprPanic "simplNonRec" (ppr pair)
-simplNonRecInCommand env dsc csc dsc_rhs csc_rhs pair mk_strict k_lazy
+simplNonRecInCommand env dsc csc dsc_rhs csc_rhs pair comm
   = do
     let x = binderOfPair pair
-    preInline <- preInlineUnconditionally env dsc_rhs csc_rhs pair NotTopLevel
+    preInline <- preInlineUnconditionally env dsc_rhs pair NotTopLevel
     case () of 
       _ | preInline
        -> do
           tick (PreInlineUnconditionally x)
           let (dsc', csc') = extendSubstWithInBindPair dsc csc dsc_rhs csc_rhs pair
-          k_lazy (env, dsc', csc')
+          simplCommand env dsc' csc' comm
         | isStrictId x
         , BindTerm _ term <- pair -- A join point could be marked strict by happenstance,
                                   -- but it's hard to see what the meaning would be here
        -> do
-          let (env', csc', _) = enterKontScope env dsc_rhs BoringCtxt (idType x)
-          simplTermInCommand env' dsc_rhs term []
-                             (Incoming (dsc_rhs, csc' `setRetKont` mk_strict) Return)
+          let (csc', _) = enterKontScope env dsc_rhs BoringCtxt (idType x)
+              mk = StrictLet { mk_scope   = (dsc, csc)
+                             , mk_binder  = x
+                             , mk_command = comm }
+          simplTermInCommand env dsc_rhs term []
+                             (Incoming (dsc_rhs, csc' `setRetKont` mk) Return)
         | otherwise
        -> do
           let (env',  dsc', csc', x')  = enterScope env dsc csc x
               (env'', x'') = addBndrRules env' dsc' csc' x x'
           (flts, env_final, dsc_final, csc_final) <- simplLazyOrJoinBind env'' dsc' csc' x'' dsc_rhs csc_rhs pair
                                                                          NotTopLevel NonRecursive
-          addingFloats flts $ k_lazy (env_final `augmentFromFloats` flts, dsc_final, csc_final)
+          addingFloats flts $ simplCommand env_final dsc_final csc_final comm
+
+{-
+simplBeta is used for
+  * [simplTermInCommand] beta reduction
+-}
+-- TODO A frustrating amount of this is C&P from simplNonRecInCommand, but
+-- previous attempts suggest the cure is worse than the disease.
+simplBeta :: SimplEnv -> DataScope
+          -> DataScope -> InVar -> InTerm
+          -> InTerm -> [ScopedFrame] -> ScopedEnd
+          -> SimplM (Floats, OutCommand)
+simplBeta env dsc dsc_rhs bndr rhs _body _fs _end
+  | tracing
+  , pprTraceShort "simplBeta" (ppr env $$ ppr dsc $$
+                               ppr (BindTerm bndr rhs) $$
+                               ppr dsc_rhs) False
+  = undefined
+simplBeta env dsc dsc_rhs x rhs body fs end
+  | Type ty <- rhs
+  = let ty' = substTy env dsc_rhs ty
+    in simplTermInCommand env (extendTvSubst dsc x ty') body fs end
+  | isTyVar x
+  = pprPanic "simplNonRec" (ppr (BindTerm x rhs))
+simplBeta env dsc dsc_rhs x rhs body fs end
+  = do
+    let pair = BindTerm x rhs
+    preInline <- preInlineUnconditionally env dsc_rhs pair NotTopLevel
+    case () of 
+      _ | preInline
+       -> do
+          tick (PreInlineUnconditionally x)
+          let dsc' = extendIdSubst dsc x (Susp dsc_rhs rhs)
+          simplTermInCommand env dsc' body fs end
+        | isStrictId x
+       -> do
+          let (csc', _) = enterKontScope env dsc_rhs BoringCtxt (idType x)
+              mk = StrictLamBind { mk_dataScope = dsc
+                                 , mk_binder   = x
+                                 , mk_term     = body
+                                 , mk_frames   = fs
+                                 , mk_end      = end }
+          simplTermInCommand env dsc_rhs rhs []
+                             (Incoming (dsc_rhs, csc' `setRetKont` mk) Return)
+        | otherwise
+       -> do
+          let (env',  dsc', x') = enterTermScope env dsc x
+              (env'', x'') = addBndrRules env' dsc' nullControlScope x x'
+          (flts, env_final, dsc_final) <- simplLazyBind env'' dsc' x'' dsc_rhs x rhs
+                                                        NotTopLevel NonRecursive
+          addingFloats flts $ simplTermInCommand env_final dsc_final body fs end
 
 -- c.f. Simplify.simplNonRecX
 simplNonRecOut :: SimplEnv -> DataScope -> InId -> OutTerm -> SimplM (Floats, SimplEnv, DataScope)
@@ -453,13 +497,11 @@ prepareRhsTerm _ _ _ v
   | isTrivialTerm v
   = return (emptyFloats, v)
 prepareRhsTerm env level x (Compute ty comm)
-  = do
-    (flts, _, term') <- prepComm env comm
-    return (flts, term')
+  = prepComm comm
   where
-    prepComm env (Eval term fs Return)
+    prepComm (Eval term fs Return)
       = do
-        (_isExp, flts, env', fs', co_maybe) <- go (0 :: Int) fs
+        (_isExp, flts, fs', co_maybe) <- go (0 :: Int) fs
         case co_maybe of
           Just co -> do
                      -- The situation: We have
@@ -479,9 +521,10 @@ prepareRhsTerm env level x (Compute ty comm)
                          info = idInfo x
                          sanitizedInfo = vanillaIdInfo `setStrictnessInfo` strictnessInfo info
                                                        `setDemandInfo` demandInfo info
-                     (flts', rhs'') <- makeTrivialWithInfo level env' sanitizedInfo rhs'
-                     return (flts `addFloats` flts', env', mkCast rhs'' co)
-          Nothing -> return (flts, env', Compute ty (Eval term fs' Return))
+                     (flts', rhs'') <- makeTrivialWithInfo level (env `augmentFromFloats` flts)
+                                         sanitizedInfo rhs'
+                     return (flts `addFloats` flts', mkCast rhs'' co)
+          Nothing -> return (flts, Compute ty (Eval term fs' Return))
       where
         -- The possibility of a coercion split makes all of this tricky. Suppose
         -- we have
@@ -506,7 +549,6 @@ prepareRhsTerm env level x (Compute ty comm)
         --
         --   * True iff it turns out this is an expandable application
         --   * New bindings being floated
-        --   * An updated environment, perhaps with some new substitutions
         --   * A list of frames, represented as the ellipses above. If we do a
         --     coercion split, these will end up in the new binding; otherwise,
         --     they will stay in the original one.
@@ -515,36 +557,36 @@ prepareRhsTerm env level x (Compute ty comm)
         -- TODO It would be easier to pass everything downward instead,
         -- employing a bit of knot-tying for the Bool, but for some reason
         -- there's no MonadFix CoreM, so we can't write MonadFix SimplM.
-        go :: Int -> [OutFrame] -> SimplM (Bool, Floats, SimplEnv, [OutFrame], Maybe OutCoercion)
+        go :: Int -> [OutFrame] -> SimplM (Bool, Floats, [OutFrame], Maybe OutCoercion)
         go nValArgs (App (Type ty) : fs)
           = prepending (App (Type ty)) $ go nValArgs fs
         go nValArgs (App arg : fs)
           = do
-            (isExp, flts, env', fs', split) <- go (nValArgs+1) fs
+            (isExp, flts, fs', split) <- go (nValArgs+1) fs
             if isExp
               then do
-                   (flts', arg') <- makeTrivial level env' arg
-                   return (True,  flts `addFloats` flts', env,  App arg' : fs', split)
-              else return (False, flts,                   env', App arg  : fs', split)
+                   (flts', arg') <- makeTrivial level (env `augmentFromFloats` flts) arg
+                   return (True,  flts `addFloats` flts', App arg' : fs', split)
+              else return (False, flts,                   App arg  : fs', split)
         go nValArgs [Cast co]
           | let Pair fromTy _toTy = coercionKind co
           , not (isUnLiftedType fromTy) -- Don't coercion-split on unlifted type
-          = return (isExpFor nValArgs, emptyFloats, env, [], Just co)
+          = return (isExpFor nValArgs, emptyFloats, [], Just co)
         go nValArgs (Cast co : fs)
           = prepending (Cast co) $ go nValArgs fs
         go nValArgs []
-          = return (isExpFor nValArgs, emptyFloats, env, [], Nothing)
+          = return (isExpFor nValArgs, emptyFloats, [], Nothing)
         go _ _
-          = return (False, emptyFloats, env, [], Nothing)
+          = return (False, emptyFloats, [], Nothing)
         
         isExpFor nValArgs
           | Var f <- term = isExpandableApp f nValArgs
           | otherwise     = False
         
         prepending f m
-          = do { (isExp, flts, env', fs, split) <- m; return (isExp, flts, env', f : fs, split) }
-    prepComm env comm
-      = return (emptyFloats, env, Compute ty comm)
+          = do { (isExp, flts, fs, split) <- m; return (isExp, flts, f : fs, split) }
+    prepComm comm
+      = return (emptyFloats, Compute ty comm)
 prepareRhsTerm _ _ _ term
   = return (emptyFloats, term)
 
@@ -659,7 +701,7 @@ completeTermBind :: SimplEnv -> DataScope -> InVar -> OutVar -> OutTerm
                  -> TopLevelFlag -> SimplM (Floats, SimplEnv, DataScope)
 completeTermBind env dsc old_id new_id term level
   = do
-    (flts, env', dsc', csc') <- completeBind env dsc emptyControlScope old_id
+    (flts, env', dsc', csc') <- completeBind env dsc nullControlScope old_id
                                              (BindTerm new_id term) level
     assert (isEmptyControlScope csc') $
       return (flts, env', dsc')
@@ -833,16 +875,7 @@ simplCommand env dsc csc (Let (Rec pairs) comm)
     (flts, env'', dsc'', csc'') <- simplRec env' dsc' csc' pairs NotTopLevel
     addingFloats flts $ simplCommand env'' dsc'' csc'' comm
 simplCommand env dsc csc (Let (NonRec pair) comm)
-  = do
-    let x = binderOfPair pair
-        -- If the binding is strict, we tail-recurse into the term, so we need
-        -- a metacontinuation to resume
-        mk_if_strict = StrictLet { mk_scope = (dsc, csc)
-                                 , mk_binder = x
-                                 , mk_command = comm }
-    simplNonRecInCommand env dsc csc dsc csc pair mk_if_strict $
-      \(env', dsc', csc') -> simplCommand env' dsc' csc' comm
-        -- Called if the binding is lazy or gets pre-inlined
+  = simplNonRecInCommand env dsc csc dsc csc pair comm
 simplCommand env dsc csc (Eval term fs end)
   = simplTermInCommand env dsc term (Incoming dsc <$> fs) (Incoming (dsc, csc) end)
 simplCommand env dsc csc (Jump args j)
@@ -851,8 +884,8 @@ simplCommand env dsc csc (Jump args j)
 simplTermNoFloats :: SimplEnv -> DataScope -> CallCtxt -> InTerm -> SimplM OutTerm
 simplTermNoFloats env dsc ctxt (Compute ty comm)
   = do
-    let (env', csc, ty') = enterKontScope env dsc ctxt ty
-    comm' <- simplCommandNoFloats env' dsc csc comm
+    let (csc, ty') = enterKontScope env dsc ctxt ty
+    comm' <- simplCommandNoFloats env dsc csc comm
     return $ mkCompute ty' comm'
 simplTermNoFloats env dsc ctxt term
   = do
@@ -866,16 +899,16 @@ simplTerm env dsc _ctxt (Coercion co)
   = return (emptyFloats, Coercion (simplCoercion env dsc co))
 simplTerm env dsc ctxt (Compute ty comm)
   = do
-    let (env', csc, ty') = enterKontScope env dsc ctxt ty
+    let (csc, ty') = enterKontScope env dsc ctxt ty
     -- Terms are closed with respect to continuation variables, so they can
     -- safely float past this binder. Continuations must *never* float past it,
     -- however, because they necessarily invoke the continuation bound here.
-    (flts, comm') <- simplCommandNoKontFloats env' dsc csc comm
+    (flts, comm') <- simplCommandNoKontFloats env dsc csc comm
     return (flts, mkCompute ty' comm')
 simplTerm env dsc ctxt v
   = do
-    let (env', csc, ty') = enterKontScope env dsc ctxt ty
-    (flts, comm) <- simplTermInCommand env' dsc v [] (Incoming (dsc, csc) Return)
+    let (csc, ty') = enterKontScope env dsc ctxt ty
+    (flts, comm) <- simplTermInCommand env dsc v [] (Incoming (dsc, csc) Return)
     return (emptyFloats, mkCompute ty' (wrapFloats flts comm))
   where ty = substTy env dsc (termType v)
 
@@ -953,8 +986,8 @@ normalizeKont env (fs, end)
   where
     doReturns :: [[ScopedFrame]] -> ScopedEnd -> ScopedKont
     doReturns acc end
-      | ((_, csc), Return) <- openScoped end
-      , Just (SynKont { mk_frames = fs', mk_end = end' }) <- substKv csc
+      | (_, csc, Return) <- openScopedEnd end
+      , SynKont { mk_frames = fs', mk_end = end' } <- retKont csc
       = doReturns (fs' : acc) end'
       | otherwise
       = (concat (reverse acc), end)
@@ -987,7 +1020,7 @@ normalizeKont env (fs, end)
           _        -> simplified co `consMaybe` doCasts Nothing (f : fs)
     doCasts (Just co) [] = simplified co `consMaybe` []
 
-    simplified co = Simplified NoDup Nothing . Cast <$> simplOutCoercion_maybe co
+    simplified co = Simplified NoDup () . Cast <$> simplOutCoercion_maybe co
                       -- Not OkToDup because an OkToDup frame must not precede a
                       -- NoDup frame
 
@@ -1033,13 +1066,13 @@ simplTermInNormCommand env_v dsc (Var x) fs end
 
 simplTermInNormCommand env_v dsc (Compute ty c) fs end
   = do
-    let (env_v', csc, _) = enterKontScope env_v dsc (getContext env_v) ty
-        csc'             = csc `setRetKont` SynKont { mk_dup    = NoDup
-                                                    , mk_frames = fs
-                                                    , mk_end    = end }
-    simplCommand env_v' dsc csc' c
+    let (csc, _) = enterKontScope env_v dsc (kontContext (fs, end)) ty
+        csc'     = csc `setRetKont` SynKont { mk_dup    = NoDup
+                                            , mk_frames = fs
+                                            , mk_end    = end }
+    simplCommand env_v dsc csc' c
 simplTermInNormCommand env dsc (Coercion co) (f : fs) end
-  | (dsc_coCo, Cast coCo) <- openScoped f
+  | (dsc_coCo, Cast coCo) <- openScopedFrame f
   = let co_out   = substCo env dsc      co
         coCo_out = substCo env dsc_coCo coCo
         co'      = simplOutCoercion (mkCoCast coCo_out co_out) in
@@ -1058,25 +1091,17 @@ simplTermInNormCommand env_v dsc v@(Lam x body) (f : fs) end
   | App arg <- f'
   = do
     tick (BetaReduction x)
-    let -- If the argument is strict, we'll tail-recurse into it; this
-        -- metacontinuation will then resume here
-        mk_if_strict = StrictLamBind { mk_dataScope  = dsc
-                                     , mk_context  = getContext env_v
-                                     , mk_binder   = x
-                                     , mk_term     = body
-                                     , mk_frames   = fs
-                                     , mk_end      = end }
-    simplNonRecInCommand env_v dsc emptyControlScope dsc_k emptyControlScope (BindTerm x arg) mk_if_strict $
-      \(env_v', dsc', _csc') -> simplTermInCommand env_v' dsc' body fs end
-        -- Called if the argument is lazy or gets pre-inlined
+    simplBeta env_v dsc dsc_k x arg body fs end
   where
-    (dsc_k, f') = openScoped f
+    (dsc_k, f') = openScopedFrame f
 simplTermInNormCommand env_v dsc term@(Lam {}) fs end
   = do
     let (xs, body) = lambdas term
         (env_v', dsc', xs') = enterLamScopes env_v dsc xs
     body' <- simplTermNoFloats env_v' dsc' BoringCtxt body
-    term' <- mkLam env_v xs' body'
+    let (_, csc, _) = openScopedEnd end
+        isRhsCtxt   = case getContext csc of { RhsCtxt -> True; _ -> False }
+    term' <- mkLam isRhsCtxt xs' body'
     simplTermInCommandDone env_v term' fs end
 simplTermInNormCommand env_v _dsc term@(Lit {}) fs end
   = simplTermInCommandDone env_v term fs end
@@ -1124,8 +1149,8 @@ simplKont env (ai@ArgInfo { ai_strs = [] }) fs end
     simplKont env (ai { ai_strs = [False] }) fs end
   where
     trivialKont | null fs
-                , ((_, csc), Return) <- openScoped end
-                , Nothing <- substKv csc
+                , (_, csc, Return) <- openScopedEnd end
+                , Stop {} <- retKont csc
                 = True
                 | otherwise
                 = False
@@ -1136,11 +1161,11 @@ simplKont env (ai@ArgInfo { ai_strs = [] }) fs end
 simplKont env ai (Simplified _ _ f : fs) end
   = simplKont env (addFrameToArgInfo ai f) fs end
 simplKont env ai (f : fs) end
-  = case openScoped f of
+  = case openScopedFrame f of
       (dsc', f') -> simplKontFrame env dsc' ai f' fs end
 simplKont env ai [] end
-  = case openScoped end of
-      ((dsc', csc), end') -> simplKontEnd env dsc' csc ai end'
+  = case openScopedEnd end of
+      (dsc', csc, end') -> simplKontEnd env dsc' csc ai end'
 
 simplKontFrame :: SimplEnv -> DataScope -> ArgInfo
                -> InFrame -> [ScopedFrame] -> ScopedEnd
@@ -1176,11 +1201,11 @@ simplKontFrame env dsc ai@(ArgInfo { ai_strs = str:_
     let mk = StrictArg { mk_dup = NoDup
                        , mk_argInfo = ai
                        , mk_frames = fs
-                       , mk_context = getContext env
+                       , mk_context = cci
                        , mk_end = end }
-        (env', csc, _ty') = enterKontScope env dsc cci (termType arg)
+        (csc, _ty') = enterKontScope env dsc cci (termType arg)
         csc' = csc `setRetKont` mk
-    simplCommand env' dsc csc' (Eval arg [] Return)
+    simplCommand env dsc csc' (Eval arg [] Return)
   | otherwise
   = do
     -- Don't float out of lazy arguments (see Simplify.rebuildCall)
@@ -1216,7 +1241,7 @@ simplKontEnd _env _dsc _csc (ArgInfo { ai_target = JumpTarget j, ai_frames = fs 
 simplKontEnd env _dsc _csc (ArgInfo { ai_target = JoinTarget join, ai_frames = fs }) end
   = assert (isReturn end && all isAppFrame fs) $ -- Note [simplKont invariants]
     do
-    let ((dsc', csc'), Join xs comm) = openScoped join
+    let (dsc', csc', Join xs comm) = openScopedJoin join
         args = [ arg | App arg <- reverse fs ]
     ((env', dsc''), flts) <- mapAccumLM (\(env, dsc) (x, v) -> twist <$> simplNonRecOut env dsc x v)
                                         (env, dsc') (zip xs args)
@@ -1230,7 +1255,7 @@ simplKontEnd env dsc csc ai@(ArgInfo { ai_target = TermTarget (Var fun), ai_rule
     match_maybe <- tryRules env rules fun args
     case match_maybe of
       Just (ruleRhs, extraArgs) ->
-        let simplFrames = map (Simplified NoDup Nothing) (map App extraArgs ++ extraFrames)
+        let simplFrames = map (Simplified NoDup ()) (map App extraArgs ++ extraFrames)
         in simplTermInCommand env emptyDataScope ruleRhs simplFrames (Incoming (dsc, csc) end)
       Nothing -> simplKontAfterRules env dsc csc ai end    
 simplKontEnd env dsc csc ai end
@@ -1251,13 +1276,13 @@ simplKontAfterRules env dsc csc ai (Case x alts)
   = do
     tick (KnownBranch x)
     case findAlt (LitAlt lit) alts of
-      Nothing -> missingAlt env dsc csc x alts
+      Nothing -> missingAlt x alts
       Just (Alt _ binds rhs) -> bindCaseBndr binds rhs
   | Just (dc, tyArgs, valArgs) <- termIsConApp_maybe env (getUnfoldingInRuleMatch env) scrut
   = do
     tick (KnownBranch x)
     case findAlt (DataAlt dc) alts of
-      Nothing -> missingAlt env dsc csc x alts
+      Nothing -> missingAlt x alts
       Just (Alt DEFAULT binds rhs) -> bindCaseBndr binds rhs
       Just (Alt _       binds rhs) -> knownCon env dsc csc scrut dc tyArgs valArgs x binds rhs 
   where
@@ -1332,40 +1357,37 @@ invokeMetaKont :: SimplEnv -> DataScope -> ControlScope -> OutTerm
                -> SimplM (Floats, OutCommand)
 invokeMetaKont env dsc csc term
   | tracing
-  , Just mk <- substKv csc
+  , let mk = retKont csc
+  , not (isStopMetaKont mk)
   , pprTraceShort "invokeMetaKont" (ppr mk $$ ppr term) False
   = undefined
   | otherwise
-  = case substKv csc of
-      Nothing
+  = case retKont csc of
+      Stop {}
         -> simplKontDone env term Return
-      Just (SynKont { mk_frames = fs, mk_end = end })
+      SynKont { mk_frames = fs, mk_end = end }
         -> warnPprTrace True __FILE__ __LINE__
              (text "SynKont lasted until invokeMetaKont" $$ ppr env $$ ppr term) $
              simplTermInCommand env dsc term fs end
-      Just (StrictArg { mk_argInfo = ai'
-                      , mk_frames = fs
-                      , mk_end = end
-                      , mk_context = ctxt })
-        -> simplKont (env `setContext` ctxt)
+      StrictArg { mk_argInfo = ai'
+                , mk_frames  = fs
+                , mk_end     = end }
+        -> simplKont env
                      (addFrameToArgInfo ai' (App term)) fs end
-      Just (StrictLet { mk_scope = (dsc_outer, csc_outer)
-                      , mk_binder = bndr
-                      , mk_command = comm })
+      StrictLet { mk_scope   = (dsc_outer, csc_outer)
+                , mk_binder  = bndr
+                , mk_command = comm }
         -> do
            (flts, env', dsc') <- simplNonRecOut env dsc_outer bndr term
-           let env_final = env' `setContext` BoringCtxt
-           addingFloats flts $ simplCommand env_final dsc' csc_outer comm
-      Just (StrictLamBind { mk_dataScope = dsc_outer
-                          , mk_binder = bndr
-                          , mk_term = body
-                          , mk_frames = fs
-                          , mk_end = end
-                          , mk_context = ctxt })
+           addingFloats flts $ simplCommand env' dsc' csc_outer comm
+      StrictLamBind { mk_dataScope = dsc_outer
+                    , mk_binder    = bndr
+                    , mk_term      = body
+                    , mk_frames    = fs
+                    , mk_end       = end }
         -> do
            (flts, env', dsc') <- simplNonRecOut env dsc_outer bndr term
-           let env_final = env' `setContext` ctxt
-           addingFloats flts $ simplTermInCommand env_final dsc' body fs end
+           addingFloats flts $ simplTermInCommand env' dsc' body fs end
 
 simplKontDone :: SimplEnv -> OutTerm -> OutEnd
               -> SimplM (Floats, OutCommand)
@@ -1406,14 +1428,14 @@ simplJump env dsc csc args j
                -> do
                   tick (UnfoldingDone j')
                   dump_inline (dynFlags env) join'
-                  reduce env emptyDataScope emptyControlScope join'
+                  reduce env emptyDataScope (zapControlScope csc) join'
       Done pk
-        -> reduce env emptyDataScope emptyControlScope pk
+        -> reduce env emptyDataScope (zapControlScope csc) pk
       Susp (dsc', csc') pk
         -> reduce env dsc' csc' pk
   where
     frames = map (Incoming dsc . App) args
-    end    = Simplified OkToDup Nothing Return
+    end    = Simplified OkToDup (retType csc, Stop { mk_context = getContext csc }) Return
     reduce env_join dsc_join csc_join join
       = simplKont env_join
                   (mkJoinArgInfo env_join (Incoming (dsc_join, csc_join) join) frames)
@@ -1595,16 +1617,16 @@ knownCon env dsc csc scrut dc tyArgs valArgs bndr binds rhs
                                                        Return
                                  ; simplNonRecOut env dsc bndr con_app }
 
-missingAlt :: SimplEnv -> DataScope -> ControlScope -> Id -> [InAlt] -> SimplM (Floats, OutCommand)
+missingAlt :: Id -> [InAlt] -> SimplM (Floats, OutCommand)
                 -- This isn't strictly an error, although it is unusual.
                 -- It's possible that the simplifer might "see" that
                 -- an inner case has no accessible alternatives before
                 -- it "sees" that the entire branch of an outer case is
                 -- inaccessible.  So we simply put an error case here instead.
                 -- (comment from Simplify.missingAlt)
-missingAlt env dsc csc case_bndr _
+missingAlt case_bndr _
   = warnPprTrace True __FILE__ __LINE__ ( ptext (sLit "missingAlt") <+> ppr case_bndr )
-    return (emptyFloats, mkImpossibleCommand (retType env dsc csc))
+    return (emptyFloats, impossibleCommand)
 
 -------------------
 -- Rewrite rules --
@@ -1657,9 +1679,9 @@ tryRules env rules fn args
 --------------
 
 -- Based on preInlineUnconditionally in SimplUtils; see comments there
-preInlineUnconditionally :: SimplEnv -> DataScope -> ControlScope -> InBindPair
+preInlineUnconditionally :: SimplEnv -> DataScope -> InBindPair
                          -> TopLevelFlag -> SimplM Bool
-preInlineUnconditionally env_x _dsc_rhs _csc_rhs pair level
+preInlineUnconditionally env_x _dsc_rhs pair level
   = do
     ans <- go (getMode env_x) <$> getDynFlags
     when tracing $ liftCoreM $ putMsg $ text "preInline" <+> ppr x <> colon <+> text (show ans)
@@ -1822,8 +1844,10 @@ distillKont env fs end = (mapMaybe (doFrame . substScopedFrame env) fs, doEnd (s
                        = Just (interestingArg v)
     doFrame _          = Nothing
     
-    doEnd (Return {})  = getContext env
+    doEnd (Return {})  = getContext csc
     doEnd (Case {})    = CaseCtxt
+    
+    (_, csc, _) = openScopedEnd end
 
 tryUnfolding :: DynFlags -> Id -> Bool -> [ArgSummary] -> CallCtxt
              -> a -> Bool -> Bool -> Bool -> Arity -> UnfoldingGuidance
@@ -1911,10 +1935,10 @@ tryUnfolding dflags id lone_variable
 ensureDupableKont :: SimplEnv -> DataScope -> ControlScope
                   -> SimplM (Floats, ControlScope)
 ensureDupableKont env dsc csc
-  | Just mk <- substKv csc
+  | let mk = retKont csc
   , not (canDupMetaKont mk)
   = do
-    (flts, mk') <- mkDupableKont env dsc csc (retType env dsc csc) mk
+    (flts, mk') <- mkDupableKont env dsc csc (retType csc) mk
     return (flts, csc `setRetKont` mk')
   | otherwise
   = return (emptyFloats, csc)
@@ -1947,7 +1971,7 @@ mkDupableKont env dsc csc ty kont
         -> do
            (flts, fs', end') <- go env [] [] ty fs end
            return (flts, SynKont { mk_dup = OkToDup
-                                 , mk_frames = map (Simplified OkToDup Nothing) fs'
+                                 , mk_frames = map (Simplified OkToDup ()) fs'
                                  , mk_end = end' })
       StrictArg { mk_argInfo = ai
                 , mk_frames  = fs
@@ -1962,13 +1986,14 @@ mkDupableKont env dsc csc ty kont
              OkToDup -> return (emptyFloats, ai)
            return (flts `addFloats` flts', kont { mk_dup     = OkToDup
                                                 , mk_argInfo = ai'
-                                                , mk_frames  = map (Simplified OkToDup Nothing) fs'
+                                                , mk_frames  = map (Simplified OkToDup ()) fs'
                                                 , mk_end     = end' })
       _ -> do
            (flts, joinKont) <- mkJoinPoint env dsc csc ty (fsLit "*mkj") kont
+           let mk' = Stop { mk_context = getContext csc }
            return (flts, SynKont { mk_dup = OkToDup
                                  , mk_frames = []
-                                 , mk_end = Simplified OkToDup Nothing joinKont })
+                                 , mk_end = Simplified OkToDup (retType csc, mk') joinKont })
            
     when tracing $ liftCoreM $ putMsg $ hang (text "mkDupableKont DONE") 4 $
       ppr ans $$ vcat (map ppr (getFloatBinds flts))
@@ -1981,11 +2006,11 @@ mkDupableKont env dsc csc ty kont
       | Simplified OkToDup _ f' <- f
       = go env fltss (f' : fs') (frameType ty f') fs end
       | otherwise
-      = case openScoped f of
+      = case openScopedFrame f of
           (dsc', f') -> doFrame env dsc' fltss fs' ty f' f fs end
     go env fltss fs' ty [] end
-      = case openScoped end of
-          ((dsc', csc'), end') -> doEnd env dsc' csc' fltss fs' ty end' end
+      = case openScopedEnd end of
+          (dsc', csc', end') -> doEnd env dsc' csc' fltss fs' ty end' end
     
     doFrame :: SimplEnv -> DataScope -> RevList Floats -> RevList OutFrame -> OutType
             -> InFrame -> ScopedFrame -> [ScopedFrame] -> ScopedEnd
@@ -2012,19 +2037,19 @@ mkDupableKont env dsc csc ty kont
           -> InEnd -> ScopedEnd
           -> SimplM (Floats, [OutFrame], ScopedEnd)
     doEnd env dsc csc fltss fs' ty Return _
-      = case substKv csc of
-          Nothing                -> done fltss fs' (Simplified OkToDup Nothing Return)
-          Just mk                 | canDupMetaKont mk
-                                 -> done fltss fs' (Simplified OkToDup (Just mk) Return)
-          Just (SynKont { mk_frames = fs, mk_end = end })
+      | let mk = retKont csc
+      = case mk of
+          _                       | canDupMetaKont mk
+                                 -> done fltss fs' (Simplified OkToDup (retType csc, mk) Return)
+          SynKont { mk_frames = fs, mk_end = end }
                                  -> go env fltss fs' ty fs end
-          Just (mk@StrictArg { mk_argInfo = ai })
+          StrictArg { mk_argInfo = ai }
                                   | argInfoHasTerm ai
                                  -> do
                                     let ty'  = funResultTy (termType (argInfoToTerm ai))
                                     (flts, mk') <- mkDupableKont env dsc csc ty' mk
-                                    done (flts:fltss) fs' (Simplified OkToDup (Just mk') Return)
-          Just mk                -> split env dsc csc fltss fs' ty [] (Simplified OkToDup (Just mk) Return)
+                                    done (flts:fltss) fs' (Simplified OkToDup (retType csc, mk') Return)
+          _                      -> split env dsc csc fltss fs' ty [] (Simplified OkToDup (retType csc, mk) Return)
                                                                       (fsLit "*imkj")
     
     -- Don't duplicate seq (see Note [Single-alternative cases] in GHC Simplify.lhs)
@@ -2047,7 +2072,8 @@ mkDupableKont env dsc csc ty kont
         alts' <- mapM (simplAlt altEnv altDsc csc Nothing [] caseBndr') alts
         (flts, alts'') <- mkDupableAlts env caseBndr' alts'
         
-        done (flts:fltss) fs' (Simplified OkToDup Nothing (Case caseBndr' alts''))
+        done (flts:fltss) fs' (Simplified OkToDup (retType csc, Stop { mk_context = getContext csc })
+                                                  (Case caseBndr' alts''))
 
     split :: SimplEnv -> DataScope -> ControlScope
           -> RevList Floats -> RevList OutFrame
@@ -2068,7 +2094,7 @@ mkDupableKont env dsc csc ty kont
           <- mkJoinPoint env dsc csc ty name (SynKont { mk_frames = fs
                                                       , mk_end    = end
                                                       , mk_dup    = NoDup })
-        done (flts:fltss) fs' (Simplified OkToDup Nothing join_kont)
+        done (flts:fltss) fs' (Simplified OkToDup (retType csc, retKont csc) join_kont)
     
     done :: RevList Floats -> RevList OutFrame -> ScopedEnd
          -> SimplM (Floats, [OutFrame], ScopedEnd)
@@ -2140,8 +2166,11 @@ mkDupableAlt env caseBndr alt@(Alt altCon bndrs rhs)
                   ppr join_rhs $$
                   ppr (Alt altCon bndrs join_comm))
         
-        flts <- addPolyBind env emptyDataScope emptyControlScope
+        flts <- addPolyBind env emptyDataScope nullControlScope
                             NotTopLevel (NonRec (BindJoin join_bndr join_rhs))
+          -- addPolyBind only uses the scopes by passing them to simplDef, which
+          -- only uses them to re-simplify a stable unfolding. Since join_bndr is
+          -- fresh, then, the scopes don't matter.
         return (flts, Alt altCon bndrs join_comm)
             
 commandIsDupable :: DynFlags -> SeqCoreCommand -> Bool

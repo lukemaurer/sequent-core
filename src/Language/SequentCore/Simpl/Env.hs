@@ -7,29 +7,30 @@ module Language.SequentCore.Simpl.Env (
   getUnfoldingInRuleMatch, activeRule, getInScopeSet,
   
   -- * Substitution and lexical scope
-  DataScope, ControlScope, SubstAns(..), KontSubst,
-  substId, substJv, substKv, substTy, substTyVar, substCo, substCoVar, lookupRecBndr,
+  DataScope, ControlScope, SubstAns(..),
+  substId, substJv, retKont, substTy, substTyVar, substCo, substCoVar, lookupRecBndr,
   substTerm, substKont, substFrame, substEnd, substJoin, substCommand,
   extendIdSubst, extendJvSubst, extendTvSubst, extendCvSubst,
   extendSubstWithInBindPair, extendSubstWithOutBindPair,
-  setRetKont,
-  emptyDataScope, emptyControlScope, isEmptyDataScope, isEmptyControlScope,
+  setRetKont, zapControlScope,
+  emptyDataScope, emptyControlScope, nullControlScope, isEmptyDataScope, isEmptyControlScope,
   enterScope, enterTermScope, enterKontScope, enterRecScopes, enterLamScope, enterLamScopes,
   mkFreshVar,
-  retType, getContext, setContext,
+  retType, getContext, kontContext,
   addBndrRules,
   getTvSubst, getCvSubst,
   
   -- * Objects with lexical scope information attached
-  Scoped(..), DupFlag(..),
-  ScopedFrame, ScopedEnd, ScopedJoin, ScopedCommand, ScopedKont,
-  openScoped, unScope, substScopedFrame, substScopedEnd,
+  Scoped(..), DataScoped, FullScoped, DupFlag(..),
+  ScopedTerm, ScopedFrame, ScopedEnd, ScopedJoin, ScopedKont,
+  openScopedFrame, openScopedEnd, openScopedJoin,
+  unScope, substScopedFrame, substScopedEnd,
   dupFlag,
   pprMultiScopedKont,
   
   -- * Generalized notion of continuation
   MetaKont(..),
-  canDupMetaKont,
+  isStopMetaKont, canDupMetaKont,
   
   -- * Sequent Core definitions (unfoldings) of identifiers
   IdDefEnv, Definition(..), UnfoldingGuidance(..),
@@ -131,8 +132,9 @@ data DataScope
 -- special @ret@ binding for the current continuation.
 data ControlScope
   = ControlScope { cs_jvSubst :: SimplJvSubst   -- InJoinId  |--> JoinSubstAns (in/out)
-                 , cs_retTy   :: Maybe OutType  -- TODO Merge into cs_retKont
-                 , cs_retKont :: KontSubst      -- ()        |--> MetaKont (in/out)
+                 , cs_retKont :: MetaKont
+                 , cs_retTy   :: OutType        -- INVARIANT: cs_retTy is type of cs_retKont
+                                                -- Note [cs_retTy]
                  }
 
 type FullScope = (DataScope, ControlScope)
@@ -144,7 +146,6 @@ data SimplEnv
                                                -- Gives the unfoldings in Sequent Core
                                                -- for Ids in the InScopeSet
                                                -- INVARIANT: dom(se_defs) is a subset of dom(se_inScope)
-                , se_context :: CallCtxt
                 , se_global  :: SimplGlobalEnv }
 
 -- | Parts of the environment that seldom change.
@@ -164,29 +165,22 @@ type SimplIdSubst  = SimplSubst DataScope SeqCoreTerm
 type SimplJvSubst  = SimplSubst FullScope SeqCoreJoin
 type TermSubstAns  = SubstAns   DataScope SeqCoreTerm
 type JoinSubstAns  = SubstAns   FullScope SeqCoreJoin
-type KontSubst     = Maybe MetaKont
+
+{-
+Note [cs_retTy]
+~~~~~~~~~~~~~~~
+
+We need cs_retTy because we cannot recover it from cs_retKont alone, even for
+simple SynKonts. One can imagine adding more type information to SynKont or to
+the continuation syntax itself, but keeping it up to date is more difficult than
+remembering the type in the control scope. It's often easy to initialize
+cs_retTy because, for instance, the control scope is being introduced by a
+Compute term, which carries precisely the type annotation needed.
+-}
 
 -----------------
 -- Scope class --
 -----------------
-
-class Scope a where
-  emptyScope   :: a
-  setKontSubst :: a -> KontSubst -> a
-
-instance Scope DataScope where
-  emptyScope = emptyDataScope
-  setKontSubst dsc _mk_m = dsc
-
-instance Scope ControlScope where
-  emptyScope = emptyControlScope
-  setKontSubst csc mk_m = csc { cs_retKont = mk_m }
-
--- covers FullScope
-instance (Scope a, Scope b) => Scope (a, b) where
-  emptyScope = (emptyScope, emptyScope)
-  (scp1, scp2) `setKontSubst` mk_m
-    = (scp1 `setKontSubst` mk_m, scp2 `setKontSubst` mk_m)
 
 emptyDataScope :: DataScope
 emptyDataScope
@@ -194,11 +188,22 @@ emptyDataScope
               , ds_tvSubst = emptyVarEnv
               , ds_cvSubst = emptyVarEnv }
 
-emptyControlScope :: ControlScope
-emptyControlScope
+emptyControlScope :: Type -> MetaKont -> ControlScope
+emptyControlScope ty mk
   = ControlScope { cs_jvSubst = emptyVarEnv
-                 , cs_retTy   = Nothing
-                 , cs_retKont = Nothing }
+                 , cs_retTy   = ty
+                 , cs_retKont = mk }
+
+-- | A fake ControlScope to use when it is known that no control scope is
+-- actually needed, such as when a BindPair is known to be a BindTerm.
+-- TODO A wart. The only obvious way to avoid it, however, is to make BindPair a
+-- GADT and use a type function, and I'd prefer to stay on this side of the
+-- Rubicon.
+nullControlScope :: ControlScope
+nullControlScope
+  = ControlScope { cs_jvSubst = emptyVarEnv
+                 , cs_retTy   = panic "nullControlScope"
+                 , cs_retKont = Stop { mk_context = BoringCtxt } }
 
 isEmptyDataScope :: DataScope -> Bool
 isEmptyDataScope dsc = isEmptyVarEnv (ds_idSubst dsc) &&
@@ -206,8 +211,7 @@ isEmptyDataScope dsc = isEmptyVarEnv (ds_idSubst dsc) &&
                        isEmptyVarEnv (ds_cvSubst dsc)
 
 isEmptyControlScope :: ControlScope -> Bool
-isEmptyControlScope csc = isEmptyVarEnv (cs_jvSubst csc) &&
-                          isNothing (cs_retKont csc)
+isEmptyControlScope csc = isEmptyVarEnv (cs_jvSubst csc)
 
 {-
 
@@ -274,7 +278,8 @@ continuations.
 
 -}
 
-data MetaKont = SynKont { mk_frames :: [ScopedFrame]
+data MetaKont = Stop { mk_context :: CallCtxt } -- Always dupable
+              | SynKont { mk_frames :: [ScopedFrame]
                         , mk_end    :: ScopedEnd
                         , mk_dup    :: !DupFlag }
               | StrictArg { mk_argInfo :: ArgInfo
@@ -290,16 +295,37 @@ data MetaKont = SynKont { mk_frames :: [ScopedFrame]
                               , mk_binder   :: InBndr
                               , mk_term     :: InTerm
                               , mk_frames   :: [ScopedFrame]
-                              , mk_end      :: ScopedEnd 
-                              , mk_context  :: CallCtxt } -- Never dupable
+                              , mk_end      :: ScopedEnd } -- Never dupable
+
+isStopMetaKont :: MetaKont -> Bool
+isStopMetaKont (Stop {}) = True
+isStopMetaKont _         = False
 
 canDupMetaKont :: MetaKont -> Bool
 canDupMetaKont mk
   = case mk of
+      Stop {}          -> True
       StrictLamBind {} -> False
       StrictLet {}     -> False
       _                -> mk_dup mk == OkToDup
-                       
+
+metaKontContext :: MetaKont -> CallCtxt
+metaKontContext mk
+  = case mk of
+      Stop          { mk_context = ctxt } -> ctxt
+      StrictArg     { mk_context = ctxt } -> ctxt
+      StrictLet     {}                    -> BoringCtxt
+      StrictLamBind {}                    -> BoringCtxt
+      SynKont       { mk_frames = fs, mk_end = end } -> kontContext (fs, end)
+
+kontContext :: ScopedKont -> CallCtxt
+kontContext (fs, end)
+  | any isValueAppFrame (map unScope fs)
+  = ValAppCtxt
+  | otherwise
+  = case openScopedEnd end of
+      (_, _,   Case {})            -> CaseCtxt
+      (_, csc, Return)             -> metaKontContext (cs_retKont csc)
 
 ---------------------
 -- Lexical scoping --
@@ -333,44 +359,67 @@ value carries a Maybe MetaKont as its one remaining piece of context.
 
 -}
 
--- TODO This is almost the same as SubstAns. Do we need both?
-data Scoped env a = Incoming           env       (In  a)
-                  | Simplified DupFlag KontSubst (Out a)
+data Scoped env_in env_out a = Incoming           env_in  (In  a)
+                             | Simplified DupFlag env_out (Out a)
 data DupFlag = NoDup | OkToDup
   deriving (Eq)
 
-type ScopedFrame = Scoped DataScope SeqCoreFrame
-type ScopedEnd   = Scoped FullScope SeqCoreEnd
-type ScopedJoin  = Scoped FullScope SeqCoreJoin
-type ScopedCommand = Scoped FullScope SeqCoreCommand
+type DataScoped = Scoped DataScope ()
+type FullScoped = Scoped FullScope (OutType, MetaKont)
+
+type ScopedTerm  = DataScoped SeqCoreTerm
+type ScopedFrame = DataScoped SeqCoreFrame
+type ScopedEnd   = FullScoped SeqCoreEnd
+type ScopedJoin  = FullScoped SeqCoreJoin
 type ScopedKont  = ([ScopedFrame], ScopedEnd)
 
-{-# INLINE openScoped #-} -- often used in pattern guards
-openScoped :: Scope scp => Scoped scp a -> (scp, In a)
-openScoped scoped
+{-# INLINE openDataScoped #-}
+openDataScoped :: DataScoped a -> (DataScope, In a)
+openDataScoped scoped
   = case scoped of
-      Incoming     scp a -> (scp, a)
-      Simplified _ mk  a -> (emptyScope `setKontSubst` mk, a)
+      Incoming     dsc a -> (dsc, a)
+      Simplified _ _   a -> (emptyDataScope, a)
 
-unScope :: Scoped env a -> a
+{-# INLINE openFullScoped #-}
+openFullScoped :: FullScoped a -> (DataScope, ControlScope, In a)
+openFullScoped scoped
+  = case scoped of
+      Incoming     (dsc, csc) a -> (dsc, csc, a)
+      Simplified _ (ty, mk)   a -> (emptyDataScope,
+                                    emptyControlScope ty mk,
+                                    a)
+
+{-# INLINE openScopedFrame #-}
+openScopedFrame :: ScopedFrame -> (DataScope, InFrame)
+openScopedFrame = openDataScoped
+
+{-# INLINE openScopedEnd #-}
+openScopedEnd :: ScopedEnd -> (DataScope, ControlScope, InEnd)
+openScopedEnd = openFullScoped
+
+{-# INLINE openScopedJoin #-}
+openScopedJoin :: ScopedJoin -> (DataScope, ControlScope, InJoin)
+openScopedJoin = openFullScoped
+
+unScope :: Scoped env_in env_out a -> a
 unScope scoped
   = case scoped of
       Incoming   _ a   -> a
       Simplified _ _ a -> a
 
-dupFlag :: Scoped env a -> DupFlag
+dupFlag :: Scoped env_in env_out a -> DupFlag
 dupFlag (Simplified flag _ _) = flag
 dupFlag (Incoming {})         = NoDup
 
 substScopedFrame :: SimplEnv -> ScopedFrame -> OutFrame
 substScopedFrame env scopedFrame
-  = case openScoped scopedFrame of
+  = case openScopedFrame scopedFrame of
       (dsc, frame) -> substFrame (text "substScopedFrame") env dsc frame
 
 substScopedEnd :: SimplEnv -> ScopedEnd -> OutEnd
 substScopedEnd env scopedEnd
-  = case openScoped scopedEnd of
-      ((dsc, csc), end) -> substEnd (text "substScopedEnd") env dsc csc end
+  = case openScopedEnd scopedEnd of
+      (dsc, csc, end) -> substEnd (text "substScopedEnd") env dsc csc end
 
 -----------------
 -- Definitions --
@@ -581,8 +630,7 @@ type OutCoVar   = CoVar
 initialEnv :: DynFlags -> SimplifierMode -> RuleBase -> (FamInstEnv, FamInstEnv)
            -> SimplEnv
 initialEnv dflags mode rules famEnvs
-  = SimplEnv { se_context = BoringCtxt
-             , se_inScope = emptyInScopeSet
+  = SimplEnv { se_inScope = emptyInScopeSet
              , se_defs    = emptyVarEnv
              , se_global  = initialGlobalEnv dflags mode rules famEnvs }
              
@@ -644,12 +692,11 @@ enterTermScopes :: SimplEnv -> DataScope -> [InVar] -> (SimplEnv, DataScope, [Ou
 enterTermScopes = mapAccumL2 enterTermScope
 
 enterKontScope :: SimplEnv -> DataScope -> CallCtxt -> InType
-               -> (SimplEnv, ControlScope, OutType)
+               -> (ControlScope, OutType)
 enterKontScope env dsc ctxt ty
-  = ( env { se_context = ctxt }
-    , ControlScope { cs_jvSubst = emptyVarEnv
-                   , cs_retTy   = Just ty'
-                   , cs_retKont = Nothing }
+  = ( ControlScope { cs_jvSubst = emptyVarEnv
+                   , cs_retTy   = ty'
+                   , cs_retKont = Stop { mk_context = ctxt } }
     , ty' )
   where
     ty' = substTy env dsc ty
@@ -672,7 +719,8 @@ enterLamScope env dsc bndr
     id2 = id1 `setIdUnfolding` CoreSubst.substUnfolding subst old_unf
     env2 = modifyInScope env1 id2
     
-    subst = mkCoreSubst (text "enterLamScope") env dsc emptyControlScope
+    csc = emptyControlScope (idType id1) (Stop { mk_context = BoringCtxt })
+    subst = mkCoreSubst (text "enterLamScope") env dsc csc
 
 enterLamScopes :: SimplEnv -> DataScope -> [InVar] -> (SimplEnv, DataScope, [OutVar])
 enterLamScopes = mapAccumL2 enterLamScope
@@ -805,8 +853,12 @@ substJv (SimplEnv { se_inScope = ins }) (ControlScope { cs_jvSubst = jvs }) j
       Just (DoneId j')        -> DoneId (refine ins j')
       Just ans                -> ans
 
-substKv :: ControlScope -> Maybe MetaKont
-substKv = cs_retKont
+zapControlScope :: ControlScope -> ControlScope
+zapControlScope csc = csc { cs_jvSubst = emptyVarEnv
+                          , cs_retKont = Stop { mk_context = getContext csc }}
+
+retKont :: ControlScope -> MetaKont
+retKont = cs_retKont
 
 refine :: InScopeSet -> OutVar -> OutVar
 refine ins x
@@ -877,8 +929,8 @@ addBndrRules env dsc csc in_id out_id
 -- Convert a whole environment to a CoreSubst.Subst. A fairly desperate measure.
 mkCoreSubst :: SDoc -> SimplEnv -> DataScope -> ControlScope -> CoreSubst.Subst
 mkCoreSubst doc env@(SimplEnv { se_inScope = in_scope })
-                dsc@(DataScope { ds_tvSubst = tv_env, ds_cvSubst = cv_env
-                               , ds_idSubst = id_env })
+                     DataScope { ds_tvSubst = tv_env, ds_cvSubst = cv_env
+                               , ds_idSubst = id_env }
                 csc@(ControlScope { cs_jvSubst = jv_env })
   = mk_subst tv_env cv_env id_env jv_env
   where
@@ -902,7 +954,7 @@ mkCoreSubst doc env@(SimplEnv { se_inScope = in_scope })
     mapInScopeSet :: (Var -> Var) -> InScopeSet -> InScopeSet
     mapInScopeSet f = mkInScopeSet . mapVarEnv f . getInScopeVars
     
-    retTy = retType env dsc csc
+    retTy = retType csc
 
 substTerm    :: SDoc -> SimplEnv -> DataScope                 -> SeqCoreTerm    -> SeqCoreTerm
 substKont    :: SDoc -> SimplEnv -> DataScope -> ControlScope -> SeqCoreKont    -> SeqCoreKont
@@ -934,9 +986,9 @@ doSubstT env dsc (Lam bndr body)
   = Lam bndr' (doSubstT env' dsc' body)
   where (env', dsc', bndr') = enterTermScope env dsc bndr
 doSubstT env dsc (Compute ty comm)
-  = Compute ty' (doSubstC env' dsc csc comm)
+  = Compute ty' (doSubstC env dsc csc comm)
   where
-    (env', csc, ty') = enterKontScope env dsc BoringCtxt ty
+    (csc, ty') = enterKontScope env dsc BoringCtxt ty
 
 doSubstK :: SimplEnv -> DataScope -> ControlScope -> SeqCoreKont -> SeqCoreKont
 doSubstK env dsc csc (fs, end)
@@ -975,7 +1027,7 @@ doSubstC env dsc csc (Let bind body)
 doSubstC env dsc csc (Jump args j)
   = case substJv env csc j of
       DoneId j' -> Jump args' j'
-      Done (Join bndrs body) -> doSubstC env dsc' emptyControlScope body
+      Done (Join bndrs body) -> doSubstC env dsc' (zapControlScope csc) body
         where
           dsc' = foldl extend emptyDataScope (bndrs `zip` args')
       Susp (dsc', csc') (Join bndrs body) -> doSubstC env dsc'' csc' body
@@ -1038,22 +1090,13 @@ extendCvSubst dsc@(DataScope { ds_cvSubst = cvs }) coVar co
   = dsc { ds_cvSubst = extendVarEnv cvs coVar co }
 
 setRetKont :: ControlScope -> MetaKont -> ControlScope
-setRetKont csc mk = csc `setKontSubst` Just mk
+setRetKont csc mk = csc { cs_retKont = mk }
 
-retType :: SimplEnv -> DataScope -> ControlScope -> Type
-retType env dsc csc
-  | Just ty <- cs_retTy csc
-  = substTy env dsc ty
-  | otherwise
-  = panic "retType at top level"
+retType :: ControlScope -> Type
+retType = cs_retTy
 
-getContext :: SimplEnv -> CallCtxt
-getContext = se_context
-
--- FIXME Getter/setter pair gives off code smell. Setting the call context
--- should probably be synchronous with entering or exiting a Compute.
-setContext :: SimplEnv -> CallCtxt -> SimplEnv
-setContext env ctxt = env { se_context = ctxt }
+getContext :: ControlScope -> CallCtxt
+getContext = metaKontContext . cs_retKont
 
 ------------
 -- Floats --
@@ -1630,13 +1673,14 @@ pprMultiScopedKont frames end = sep $ punctuate semi (map ppr frames ++ [pprEnd 
     pprEnd end = ppr end <+> whereClause
     
     whereClause
-      | Just mk <- findMetaKont end
-      = hang (text "where") 2 (text "ret" <+> equals <+> ppr mk)
-      | otherwise
-      = empty
+      = case findMetaKont end of
+          Stop { mk_context = BoringCtxt } -> empty
+          Stop { mk_context = ctxt }       -> text "in context" <+> ppr ctxt
+          mk                               -> hang (text "where") 2
+                                                   (text "ret" <+> equals <+> ppr mk)
     
-    findMetaKont (Incoming (_, csc) _) = substKv csc
-    findMetaKont (Simplified _ mk_m _) = mk_m
+    findMetaKont (Incoming (_, csc) _) = retKont csc
+    findMetaKont (Simplified _ (_, mk_m) _) = mk_m
 
 instance Outputable DataScope where
   ppr dsc
@@ -1655,7 +1699,6 @@ instance Outputable SimplEnv where
   ppr env
     =  text "<InScope   =" <+> braces (fsep (map ppr (varEnvElts (getInScopeVars (se_inScope env)))))
 --    $$ text " Defs      =" <+> ppr defs
-    $$ text " Context   =" <+> ppr (se_context env)
      <> char '>'
 
 pprTermEnv :: SimplEnv -> DataScope -> SDoc
@@ -1665,7 +1708,6 @@ pprTermEnv env dsc
   $$ text " IdSubst   =" <+> ppr (ds_idSubst dsc)
   $$ text " TvSubst   =" <+> ppr (ds_tvSubst dsc)
   $$ text " CvSubst   =" <+> ppr (ds_cvSubst dsc)
-  $$ text " Context   =" <+> ppr (se_context env)
    <> char '>'
 
 instance Outputable a => Outputable (SubstAns env a) where
@@ -1674,6 +1716,11 @@ instance Outputable a => Outputable (SubstAns env a) where
   ppr (Susp _env v) = brackets $ hang (text "Suspended:") 2 (pprDeeper (ppr v))
 
 instance Outputable MetaKont where
+  ppr (Stop { mk_context = context })
+    = text "Stop" <+> suffix
+    where
+      suffix | BoringCtxt <- context = empty
+             | otherwise             = parens (ppr context)
   ppr (SynKont { mk_frames = frames, mk_end = end })
     = pprMultiScopedKont frames end
   ppr (StrictArg { mk_argInfo = ai
@@ -1709,13 +1756,13 @@ instance Outputable Definition where
   ppr (NotAmong alts) = text "NotAmong" <+> ppr alts
   ppr NoDefinition = text "NoDefinition"
   
-instance Outputable a => Outputable (Scoped env a) where
-  ppr (Incoming _ a) = text "<incoming>" <+> ppr a
+instance Outputable a => Outputable (Scoped env_in env_out a) where
+  ppr (Incoming _ a) = text "<in>" <+> ppr a
   ppr (Simplified dup _ a) = ppr dup <+> ppr a
 
 instance Outputable DupFlag where
-  ppr OkToDup = text "<ok to dup>"
-  ppr NoDup   = text "<no dup>"
+  ppr OkToDup = text "<dup>"
+  ppr NoDup   = text "<nodup>"
 
 instance Outputable Floats where
   ppr (Floats binds ff) = ppr ff $$ ppr (fromOL binds)

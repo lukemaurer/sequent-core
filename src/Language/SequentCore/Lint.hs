@@ -363,7 +363,7 @@ lintCoreEnd desc env ty (Case bndr alts)
     let env' = mapTermLintEnv (\ent -> extendTvInScopeSubsted ent bndr) env
     forM_ alts $ \(Alt _ bndrs rhs) ->
       lintCoreCommand (mapTermLintEnv (\ent' -> extendTvInScopeListSubsted ent' bndrs) env') rhs
-    void $ checkingType (desc <> colon <+> text "type of case binder") ty $
+    void $ checkingType (desc <> colon <+> text "type of case binder" <+> ppr bndr) ty $
       return $ substTy (termEnv env) (idType bndr)
 
 extendTvInScopeSubsted :: TvSubst -> Var -> TvSubst

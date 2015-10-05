@@ -19,7 +19,7 @@ module Language.SequentCore.Syntax (
   -- * Constructors
   mkCommand, mkVarArg, mkLambdas, mkCompute, mkComputeEval,
   mkAppTerm, mkConstruction, mkConstructionCommand,
-  mkCast, castBottomTerm, mkImpossibleCommand,
+  mkCast, impossibleCommand,
   addLets, addLetsToTerm, addNonRec,
   -- * Deconstructors
   lambdas, collectArgs, collectTypeArgs, collectTypeAndOtherArgs, collectArgsUpTo,
@@ -75,6 +75,7 @@ import TyCon
 import Type      ( Type, KindOrType, eqType )
 import qualified Type
 import TysPrim
+import TysWiredIn
 import Util      ( count )
 import Var       ( Var, isId )
 import VarEnv
@@ -261,15 +262,6 @@ mkCast term co
   where
     ty = pSnd (coercionKind co)
 
--- | Form a term that takes a term assumed to be bottoming and "casts" it to
--- any other type using an empty case.
-castBottomTerm :: SeqCoreTerm -> Type -> SeqCoreTerm
-castBottomTerm v ty | termTy `Type.eqType` ty = v
-                    | otherwise          = Compute ty (Eval v [] (Case wild []))
-  where
-    termTy = termType v
-    wild = mkWildValBinder termTy
-
 -- | Builds a term that applies a constructor to some arguments.
 mkConstruction :: HasId b => DataCon -> [Type] -> [Term b] -> Term b
 mkConstruction dc tyArgs valArgs
@@ -280,11 +272,12 @@ mkConstructionCommand :: DataCon -> [Type] -> [Term b] -> Command b
 mkConstructionCommand dc tyArgs valArgs
   = Eval (Var (dataConWorkId dc)) (map App (map Type tyArgs ++ valArgs)) Return
 
--- | Builds a command that throws a runtime error indicating that an
--- impossible case alternative has been reached.
-mkImpossibleCommand :: Type -> Command b
-mkImpossibleCommand ty
-  = Eval (Var rUNTIME_ERROR_ID) [App (Type ty), App errString] Return
+-- | A command that throws a runtime error indicating that an impossible case
+-- alternative has been reached.
+impossibleCommand :: SeqCoreCommand
+impossibleCommand
+  = Eval (Var rUNTIME_ERROR_ID) [App (Type unitTy), App errString] $
+      Case (mkWildValBinder unitTy) []
   where
     errString = Lit (mkMachString "Impossible case alternative")
 
