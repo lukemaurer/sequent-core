@@ -1399,7 +1399,7 @@ simplKontDone env term end
       -- Common code path: simplKontAfterRules -> invokeKont -> simplKontDone
   = return (emptyFloats, Eval term' fs end)
   | otherwise
-  = return (emptyFloats, mkCommand [] term [] end)
+  = return (emptyFloats, Eval term [] end)
 
 -----------
 -- Jumps --

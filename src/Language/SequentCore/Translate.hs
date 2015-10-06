@@ -810,7 +810,7 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
       Core.Type t        -> done $ Type (substTy subst t)
       where
         subst = fce_subst env
-        done term = mkCommand (reverse binds) term fs end
+        done term = addLets (reverse binds) $ Eval term fs end
         
         goApp x args = case conv_maybe of
           Just conv@(ByJump descs)
@@ -824,7 +824,7 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
             conv_maybe = kontCallConv env x'
             p = let Just conv = conv_maybe in idToJoinId x' conv
             
-            doneEval v fs e = mkCommand (reverse binds) v fs e
+            doneEval v fs e = addLets (reverse binds) $ Eval v fs e
             doneJump vs j = foldr Let (Jump vs j) (reverse binds)
 
 fromCoreLams :: FromCoreEnv -> MarkedVar -> Core.Expr MarkedVar

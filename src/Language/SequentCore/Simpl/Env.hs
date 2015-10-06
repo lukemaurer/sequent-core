@@ -1248,7 +1248,7 @@ wrapFloatsAroundTerm flts (Compute p comm)
                                                   (getFloatBinds flts))) $
     Compute p (wrapFloats (zapKontFloats flts) comm)
 wrapFloatsAroundTerm flts term
-  = mkCompute (termType term) $ wrapFloats flts (mkCommand [] term [] Return)
+  = mkCompute (termType term) $ wrapFloats flts (Eval term [] Return)
 
 addFloats :: Floats -> Floats -> Floats
 addFloats (Floats bs1 l1) (Floats bs2 l2)

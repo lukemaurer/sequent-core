@@ -17,7 +17,7 @@ module Language.SequentCore.Syntax (
     SeqCoreCommand, SeqCoreBind, SeqCoreBindPair, SeqCoreBndr,
     SeqCoreAlt, SeqCoreProgram,
   -- * Constructors
-  mkCommand, mkVarArg, mkLambdas, mkCompute, mkComputeEval,
+  mkVarArg, mkLambdas, mkCompute, mkComputeEval,
   mkAppTerm, mkConstruction, mkConstructionCommand,
   mkCast, impossibleCommand,
   addLets, addLetsToTerm, addNonRec,
@@ -81,6 +81,7 @@ import Var       ( Var, isId )
 import VarEnv
 
 import Control.Monad ( guard )
+import Control.Exception ( assert )
 
 import Data.Maybe
 
@@ -202,18 +203,6 @@ type SeqCoreProgram = Program Var
 -- Constructors
 --------------------------------------------------------------------------------
 
--- | Constructs a command, given @let@ bindings, a term, and a continuation.
---
--- A smart constructor. If the term happens to be a Compute, may fold its
--- command into the result.
-mkCommand :: HasId b => [Bind b] -> Term b -> [Frame b] -> End b -> Command b
-mkCommand binds (Compute _ comm) frames end
-  | (binds', Left (term, [], Return)) <- flattenCommand comm
-  = mkCommand (binds ++ binds') term frames end
-
-mkCommand binds term frames end
-  = foldr Let (Eval term frames end) binds
-
 -- | Makes an argument out of a variable. Type variables must be represented
 -- using the 'Type' constructor and coercion variables must use the 'Coercion'
 -- constructor; this function chooses as appropriate.
@@ -290,17 +279,22 @@ addLets = flip (foldr Let)
 addNonRec :: HasId b => BindPair b -> Command b -> Command b
 addNonRec (BindTerm bndr rhs) comm
   | needsCaseBinding (idType (identifier bndr)) rhs
-  = mkCommand [] rhs [] (Case bndr [Alt DEFAULT [] comm])
+  = Eval rhs [] (Case bndr [Alt DEFAULT [] comm])
 addNonRec pair comm
-  = addLets [NonRec pair] comm
+  = Let (NonRec pair) comm
 
--- | Adds the given bindings to a term. Generally this requires making it into
--- a Compute, as Let produces a command, not a term.
+-- | Adds the given term bindings to a term. Generally this requires making it
+-- into a Compute, as Let produces a command, not a term.
+--
+-- All the bindings must be term bindings; moving join bindings inside a Compute
+-- is in general not safe.
 addLetsToTerm :: [SeqCoreBind] -> SeqCoreTerm -> SeqCoreTerm
 addLetsToTerm [] term = term
-addLetsToTerm binds term = mkCompute ty (mkCommand binds term [] Return)
-  where
-    ty = termType term
+addLetsToTerm binds term
+  = assert (all bindsTerm (flattenBinds binds)) $
+    case term of
+      Compute ty comm -> Compute ty (addLets binds comm)
+      _               -> Compute (termType term) (addLets binds $ Eval term [] Return)
 
 --------------------------------------------------------------------------------
 -- Deconstructors
