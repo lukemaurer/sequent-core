@@ -19,6 +19,7 @@ import GhcPlugins ( Plugin(installCoreToDos), CommandLineOption
                   , getDynFlags, ufCreationThreshold
                   )
 
+import Language.SequentCore.FVs
 import Language.SequentCore.Lint
 import Language.SequentCore.Simpl.ExprSize
 import Language.SequentCore.Syntax
@@ -27,6 +28,7 @@ import Language.SequentCore.Plugin
 import ErrUtils   ( ghcExit )
 import Outputable
 import Maybes     ( whenIsJust )
+import VarSet
 
 import Control.Monad ( forM_, unless, when )
 
@@ -60,15 +62,18 @@ install cmdLine todos =
 
 data Options = Options { opt_where :: Where
                        , opt_silent, opt_lint, opt_sizes :: Bool
+                       , opt_defs, opt_fvs :: Bool
                        , opt_badOptions :: [CommandLineOption] }
 
-data Where = AtStart | AtEnd | AtBoth
+data Where   = AtStart | AtEnd | AtBoth
 
 defaults :: Options
 defaults = Options { opt_where  = AtStart
                    , opt_silent = False
                    , opt_lint   = True
                    , opt_sizes  = False
+                   , opt_defs   = False
+                   , opt_fvs    = False
                    , opt_badOptions = [] }
 
 parseOpts :: [CommandLineOption] -> Options
@@ -82,6 +87,8 @@ parseOpts = foldl parse defaults . concatMap (split ',')
       "nolint" -> opts { opt_lint   = False   }
       "silent" -> opts { opt_silent = True    }
       "size"   -> opts { opt_sizes  = True    }
+      "defs"   -> opts { opt_defs   = True    }
+      "fvs"    -> opts { opt_fvs    = True    }
       _        -> opts { opt_badOptions = str : opt_badOptions opts }
     
     split _ [] = []
@@ -118,4 +125,7 @@ showBind opts pair
         size = case pair of
                  BindTerm _ term -> termSize dflags cap term
                  BindJoin _ join -> joinSize dflags cap join
-    putMsg $ sep [ idPart, sizePart ]
+        fvPart = ppWhen (opt_fvs opts) $
+                   text "FVs:" <+> pprWithCommas ppr (varSetElems (freeVars pair))
+        defPart = ppWhen (opt_defs opts) $ ppr pair
+    putMsg $ sep [ idPart, sizePart, fvPart, defPart ]

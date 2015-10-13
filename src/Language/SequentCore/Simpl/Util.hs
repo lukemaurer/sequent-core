@@ -755,7 +755,7 @@ mkLam inRhsCtxt bndrs body
     mkLam' dflags bndrs body@(Lam {})
       = mkLam' dflags (bndrs ++ bndrs1) body1
       where
-        (bndrs1, body1) = lambdas body
+        (bndrs1, body1) = collectBinders body
 
     mkLam' dflags bndrs body
       | gopt Opt_DoEtaReduction dflags

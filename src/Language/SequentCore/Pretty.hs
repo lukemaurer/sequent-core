@@ -96,7 +96,7 @@ ppr_term add_par term@(Lam {})
       hang (char '\\' <+> fsep (map (pprBndr LambdaBind) bndrs) <+> arrow)
         2 (pprDeeper $ pprCoreTerm body)
   where
-    (bndrs, body) = lambdas term
+    (bndrs, body) = collectBinders term
 ppr_term add_par (Compute ty comm)
   = add_par $
       hang (text "compute" <+> parens (ppr_kont_bndr ty))

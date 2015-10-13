@@ -18,14 +18,18 @@ module Language.SequentCore.Syntax.Util (
   tryEtaReduce,
   
   -- * Free variables
-  termFreeVars
+  termFreeVars,
+
+  -- * Uniquification
+  uniquifyProgram
 ) where
 
+import Language.SequentCore.FVs
 import Language.SequentCore.Syntax
-import Language.SequentCore.Translate
 
 import Coercion
-import CoreFVs   ( exprFreeVars )
+import CoreSubst ( Subst )
+import qualified CoreSubst
 import CoreSyn   ( cmpAltCon, isEvaldUnfolding, Tickish(..) )
 import CoreUtils ( dataConRepInstPat )
 import DataCon
@@ -38,10 +42,12 @@ import Unique
 import Util      ( debugIsOn
                  , count, dropList, filterOut )
 import Var
+import VarEnv
 import VarSet
 
-import Control.Applicative ( (<$>) )
+import Control.Applicative ( (<$>), (<*>), pure )
 import Control.Exception ( assert )
+import Control.Monad.Trans.State
 
 import Data.List
 import Data.Maybe
@@ -307,5 +313,58 @@ tryEtaReduce bndrs body@(Compute _ (Eval fun fs Return))
 tryEtaReduce _ _ = Nothing
 
 termFreeVars :: SeqCoreTerm -> VarSet
--- Cheat for now
-termFreeVars = exprFreeVars . termToCoreExpr
+termFreeVars = freeVars -- see Language.SequentCore.FVs
+
+uniquifyProgram :: SeqCoreProgram -> SeqCoreProgram
+uniquifyProgram prgm
+  = evalState (mapM doTopBind prgm) initState
+  where
+    initState :: Subst
+    initState = CoreSubst.mkEmptySubst (mkInScopeSet (mkVarSet (bindersOfBinds prgm)))
+                  -- Top-level binders are always in scope and cannot be changed
+
+    doTopBind :: SeqCoreBind -> State Subst SeqCoreBind
+    doTopBind (NonRec pair) = NonRec <$> doPair pair
+    doTopBind (Rec pairs)   = Rec <$> mapM doPair pairs
+
+    doPair (BindTerm x term) = BindTerm x <$> doTerm term
+    doPair (BindJoin j join) = BindJoin j <$> doJoin join
+
+    doBndr bndr
+      = do
+        subst <- get
+        let (subst', bndr') = CoreSubst.substBndr subst bndr
+        put subst'
+        return bndr'
+
+    doTerm (Lit lit) = return $ Lit lit
+    doTerm (Type ty) = Type <$> (CoreSubst.substTy <$> get <*> pure ty)
+    doTerm (Coercion co) = Coercion <$> (CoreSubst.substCo <$> get <*> pure co)
+    doTerm (Var var) = Var <$> (CoreSubst.substIdOcc <$> get <*> pure var)
+    doTerm (Compute ty comm)
+      = Compute <$> (CoreSubst.substTy <$> get <*> pure ty) <*> doComm comm
+    doTerm (Lam bndr body) = Lam <$> doBndr bndr <*> doTerm body
+
+    doFrame (App arg) = App <$> doTerm arg
+    doFrame (Cast co) = Cast <$> (CoreSubst.substCo <$> get <*> pure co)
+    doFrame (Tick ti) = Tick <$> (CoreSubst.substTickish <$> get <*> pure ti)
+
+    doEnd Return = return Return
+    doEnd (Case bndr alts) = Case <$> doBndr bndr <*> mapM doAlt alts
+
+    doComm (Let bind body) = Let <$> doBind bind <*> doComm body
+    doComm (Eval term frames end) = Eval <$> doTerm term <*> mapM doFrame frames
+                                                         <*> doEnd end
+    doComm (Jump args j) = Jump <$> mapM doTerm args
+                                <*> (CoreSubst.substIdOcc <$> get <*> pure j)
+
+    doJoin (Join bndrs comm) = Join <$> mapM doBndr bndrs <*> doComm comm
+
+    doBind (NonRec pair) = do pair' <- doPair pair
+                              bndr' <- doBndr (binderOfPair pair)
+                              return $ NonRec (pair' `setPairBinder` bndr')
+    doBind (Rec pairs)   = do bndrs' <- mapM (doBndr . binderOfPair) pairs
+                              pairs' <- mapM doPair pairs
+                              return $ Rec (zipWith setPairBinder pairs' bndrs')
+
+    doAlt (Alt con bndrs rhs) = Alt con <$> mapM doBndr bndrs <*> doComm rhs

@@ -22,7 +22,7 @@ module Language.SequentCore.Syntax (
   mkCast, impossibleCommand,
   addLets, addLetsToTerm, addNonRec,
   -- * Deconstructors
-  lambdas, collectArgs, collectTypeArgs, collectTypeAndOtherArgs, collectArgsUpTo,
+  collectBinders, collectArgs, collectTypeArgs, collectTypeAndOtherArgs, collectArgsUpTo,
   splitCastTerm, splitCastCommand,
   spanTypes,
   flattenCommand,
@@ -32,7 +32,8 @@ module Language.SequentCore.Syntax (
   termIsConstruction, termAsConstruction, splitConstruction,
   commandAsSaturatedCall, asSaturatedCall, asValueCommand,
   binderOfPair, setPairBinder,
-  bindsTerm, bindsJoin, flattenBind, flattenBinds, bindersOf, bindersOfBinds,
+  bindsTerm, bindsJoin, flattenBind, flattenBinds,
+  bindersOf, bindersOfBinds, mapBindersOfBind,
   -- * Calculations
   termType, frameType, applyTypeToArg, applyTypeToArgs, applyTypeToFrames,
   termIsBottom, commandIsBottom,
@@ -301,11 +302,11 @@ addLetsToTerm binds term
 --------------------------------------------------------------------------------
 
 -- | Divide a term into a sequence of lambda-bound variables and a body. If @v@
--- is not a lambda, then @lambdas v == ([], v)@.
-lambdas :: Term b -> ([b], Term b)
-lambdas (Lam x body) = (x : xs, body')
-  where (xs, body')  = lambdas body
-lambdas term         = ([], term)
+-- is not a lambda, then @collectBinders v == ([], v)@.
+collectBinders :: Term b -> ([b], Term b)
+collectBinders (Lam x body) = (x : xs, body')
+  where (xs, body') = collectBinders body
+collectBinders term         = ([], term)
 
 -- | Divide a list of frames into a sequence of value arguments and an outer
 -- continuation. If @fs@ does not start with a value application frame, then
@@ -587,6 +588,14 @@ bindersOf (Rec pairs) = map binderOfPair pairs
 -- | Get all the binders in a list of bindings.
 bindersOfBinds :: [Bind b] -> [b]
 bindersOfBinds = concatMap bindersOf
+
+-- | Apply a function to all the binders in a binding.
+mapBindersOfBind :: (b -> b) -> Bind b -> Bind b
+mapBindersOfBind f bind
+  = case bind of NonRec pair -> NonRec $ doPair pair
+                 Rec pairs   -> Rec $ map doPair pairs
+  where
+    doPair pair = pair `setPairBinder` f (binderOfPair pair)
 
 --------------------------------------------------------------------------------
 -- Calculations

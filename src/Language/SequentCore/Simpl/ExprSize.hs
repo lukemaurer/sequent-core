@@ -82,7 +82,7 @@ joinSize    :: DynFlags -> Int -> SeqCoreJoin    -> Maybe ExprSize
 commandSize :: DynFlags -> Int -> SeqCoreCommand -> Maybe ExprSize
 
 termSize dflags cap term@(Lam {})
-  = let (xs, body) = lambdas term
+  = let (xs, body) = collectBinders term
         valBinders = filter isId xs
         (sizeT, _, _) = sizeFuncs dflags cap valBinders
     in body2ExprSize valBinders $ sizeT body

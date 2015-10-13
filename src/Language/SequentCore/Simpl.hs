@@ -1096,7 +1096,7 @@ simplTermInNormCommand env_v dsc v@(Lam x body) (f : fs) end
     (dsc_k, f') = openScopedFrame f
 simplTermInNormCommand env_v dsc term@(Lam {}) fs end
   = do
-    let (xs, body) = lambdas term
+    let (xs, body) = collectBinders term
         (env_v', dsc', xs') = enterLamScopes env_v dsc xs
     body' <- simplTermNoFloats env_v' dsc' BoringCtxt body
     let (_, csc, _) = openScopedEnd end

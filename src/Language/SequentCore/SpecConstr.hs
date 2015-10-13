@@ -378,7 +378,7 @@ specialize env (ScUsage calls used) (x, v)
 
     binders :: [Var] -- ^ Binders for the bound function. Empty if not a function.
     body :: SeqCoreTerm -- ^ Body of the bound function after all lambdas.
-    (binders, body) = lambdas v
+    (binders, body) = collectBinders v
 
     -- Create the specializations for the binding @let x = c@.
     mkSpecs :: CoreM [Spec]

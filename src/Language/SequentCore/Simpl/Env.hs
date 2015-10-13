@@ -551,7 +551,7 @@ mkTermGuidance dflags term
     
     cap   = ufCreationThreshold dflags
     size  = termSize dflags cap term
-    bndrs = fst (lambdas term)
+    bndrs = fst (collectBinders term)
 
 mkJoinGuidance :: DynFlags -> OutJoin -> (Arity, UnfoldingGuidance)
 mkJoinGuidance dflags join@(Join bndrs _)
@@ -1505,7 +1505,7 @@ termIsConApp_maybe env id_unf term
        -> Maybe (DataCon, [Type], [OutTerm])
     go subst term@(Lam {}) fs co_m
       | Just (args, co_m') <- extractArgs subst True fs -- only trivial args
-      , let (bndrs, body) = lambdas term
+      , let (bndrs, body) = collectBinders term
       , bndrs `equalLength` args
       , Just (term', fs') <- match body
       = let subst' = foldl2 extend subst bndrs args

@@ -1250,7 +1250,7 @@ occAnalTerm env expr@(Lam _ _)
     in
     (really_final_usage, mkLambdas tagged_binders body') }
   where
-    (binders, body)      = lambdas expr
+    (binders, body)      = collectBinders expr
     (env_body, binders') = oneShotGroup env binders
 
 occAnalTerm env (Compute ty comm)

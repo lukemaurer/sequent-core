@@ -28,9 +28,12 @@ flag examples
 library
   hs-source-dirs:      src
   exposed-modules:     Language.SequentCore
+                       Language.SequentCore.Annot
                        Language.SequentCore.Arity
                        Language.SequentCore.Dump
+                       Language.SequentCore.FVs
                        Language.SequentCore.Inspect
+                       Language.SequentCore.LiftLambdas
                        Language.SequentCore.Lint
                        Language.SequentCore.OccurAnal
                        Language.SequentCore.Plugin
