@@ -31,6 +31,7 @@ library
                        Language.SequentCore.Annot
                        Language.SequentCore.Arity
                        Language.SequentCore.Dump
+                       Language.SequentCore.FloatOut
                        Language.SequentCore.FVs
                        Language.SequentCore.Inspect
                        Language.SequentCore.LiftLambdas
@@ -44,6 +45,7 @@ library
                        Language.SequentCore.Syntax.Util
                        Language.SequentCore.Translate
   other-modules:       Language.SequentCore.Simpl.Env
+                       Language.SequentCore.FloatOut.SetLevels
                        Language.SequentCore.Simpl.ExprSize
                        Language.SequentCore.Simpl.Monad
                        Language.SequentCore.Simpl.Util

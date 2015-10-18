@@ -20,7 +20,7 @@
 
 module Language.SequentCore.Arity (
         manifestArity, termArity, termBotStrictness_maybe,
-        termEtaExpandArity, findRhsArity, CheapMeasure, etaExpand
+        termEtaExpandArity, findRhsArity, CheapMeasure, etaExpand, etaExpandRhs
     ) where
 
 import Language.SequentCore.Syntax
@@ -883,6 +883,10 @@ etaExpand n orig_term
                         where
                             in_scope = mkInScopeSet (exprFreeVars (termToCoreExpr term))
                             (bodyTy, etas) = mkEtaWW n orig_term in_scope (termType term)
+
+etaExpandRhs :: Arity -> SeqCoreBindPair -> SeqCoreBindPair
+etaExpandRhs n (BindTerm bndr term) = BindTerm bndr (etaExpand n term)
+etaExpandRhs _ bindJoin             = bindJoin
 
                                 -- Wrapper    Unwrapper
 --------------

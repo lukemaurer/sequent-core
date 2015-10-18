@@ -17,7 +17,9 @@ module Language.SequentCore.FVs (
   SeqCoreTermWithFVs, SeqCoreArgWithFVs, SeqCoreFrameWithFVs, SeqCoreEndWithFVs,
   SeqCoreCommandWithFVs, SeqCoreJoinWithFVs, SeqCoreBindPairWithFVs,
   SeqCoreBindWithFVs, SeqCoreAltWithFVs, SeqCoreKontWithFVs,
-  SeqCoreProgramWithFVs
+  SeqCoreProgramWithFVs,
+
+  CoreFVs.idFreeVars, CoreFVs.varTypeTyVars
 ) where
 
 import Language.SequentCore.Annot
@@ -36,6 +38,8 @@ import Control.Applicative ( (<$>) )
 -- | Predicate on possible free variables: returns @True@ iff the variable is interesting
 type InterestingVarFun = Var -> Bool
 
+-- | Class of syntactic entities that can be queried for their free variables
+-- or annotated with the free variables at each subexpression.
 class FreeVars a a' | a -> a', a' -> a where
   -- | Find all locally-defined free Ids or type variables in an expression
   freeVars     :: a -> VarSet

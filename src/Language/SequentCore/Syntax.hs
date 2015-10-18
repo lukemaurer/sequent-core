@@ -1,4 +1,5 @@
-{-# LANGUAGE LambdaCase, FlexibleInstances, TypeSynonymInstances #-}
+{-# LANGUAGE LambdaCase, FlexibleInstances, TypeSynonymInstances, CPP,
+             DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
 
 -- | 
 -- Module      : Language.SequentCore.Syntax
@@ -12,15 +13,16 @@ module Language.SequentCore.Syntax (
   -- * AST Types
   Term(..), Arg, Frame(..), End(..), Join(..), Command(..),
   Bind(..), BindPair(..),
-  Alt(..), AltCon(..), Program, JoinId, Kont,
+  Alt(..), AltCon(..), Tickish, Program, JoinId, Kont,
   SeqCoreTerm, SeqCoreArg, SeqCoreKont, SeqCoreFrame, SeqCoreEnd, SeqCoreJoin,
     SeqCoreCommand, SeqCoreBind, SeqCoreBindPair, SeqCoreBndr,
     SeqCoreAlt, SeqCoreProgram,
   -- * Constructors
   mkVarArg, mkLambdas, mkCompute, mkComputeEval,
-  mkAppTerm, mkConstruction, mkConstructionCommand,
+  mkAppTerm, mkVarAppTerm, mkVarApps, mkConstruction, mkConstructionCommand,
   mkCast, impossibleCommand,
   addLets, addLetsToTerm, addNonRec,
+  mkTickTerm, mkTickCommand, tickHNFArgs,
   -- * Deconstructors
   collectBinders, collectArgs, collectTypeArgs, collectTypeAndOtherArgs, collectArgsUpTo,
   splitCastTerm, splitCastCommand,
@@ -34,6 +36,8 @@ module Language.SequentCore.Syntax (
   binderOfPair, setPairBinder,
   bindsTerm, bindsJoin, flattenBind, flattenBinds,
   bindersOf, bindersOfBinds, mapBindersOfBind,
+  -- * Tagged binders
+  TaggedBndr(..), Tagged, TaggedProgram, TaggedKont, deTag,
   -- * Calculations
   termType, frameType, applyTypeToArg, applyTypeToArgs, applyTypeToFrames,
   termIsBottom, commandIsBottom,
@@ -45,6 +49,7 @@ module Language.SequentCore.Syntax (
   termIsExpandable, commandIsExpandable,
   CheapAppMeasure, isCheapApp, isExpandableApp,
   termIsCheapBy, commandIsCheapBy,
+  termIsHNF, termIsConLike,
   -- * Continuation ids
   isJoinId, Language.SequentCore.WiredIn.mkKontTy, kontTyArg,
   -- * Alpha-equivalence
@@ -59,9 +64,11 @@ import Language.SequentCore.WiredIn
 import Coercion  ( Coercion, coercionKind, coercionType, coreEqCoercion
                  , isCoVar, isCoVarType
                  , isReflCo, mkCoCast, mkCoVarCo, mkTransCo )
-import CoreSyn   ( AltCon(..), Tickish, tickishCounts, isRuntimeVar
-                 , isEvaldUnfolding )
-import DataCon   ( DataCon, dataConTyCon, dataConRepArity
+import CoreSyn   ( AltCon(..), TaggedBndr(..), Tickish, Unfolding
+                 , isRuntimeVar, isEvaldUnfolding, isConLikeUnfolding
+                 , tickishCounts, tickishCanSplit, tickishScoped
+                 , mkNoCount, mkNoScope )
+import DataCon   ( DataCon, dataConTyCon, dataConRepArity, dataConRepType
                  , dataConUnivTyVars, dataConExTyVars, dataConWorkId )
 import Id        ( Id, isDataConWorkId, isDataConWorkId_maybe, isConLikeId
                  , idArity, idType, idDetails, idUnfolding, isBottomingId )
@@ -84,7 +91,9 @@ import VarEnv
 import Control.Monad ( guard )
 import Control.Exception ( assert )
 
+import Data.Foldable         ( Foldable )
 import Data.Maybe
+import Data.Traversable
 
 --------------------------------------------------------------------------------
 -- AST Types
@@ -107,6 +116,7 @@ data Term b     = Lit Literal       -- ^ A primitive literal value.
                                     -- argument to a type-level lambda.
                 | Coercion Coercion -- ^ A coercion. Used to pass evidence
                                     -- for the @cast@ operation to a lambda.
+  deriving (Functor, Foldable, Traversable)
 
 -- | An argument, which can be a regular term or a type or coercion.
 type Arg b = Term b
@@ -125,6 +135,7 @@ data Frame b    = App {- expr -} (Arg b)
                   -- ^ Cast the value using the given coercion.
                 | Tick (Tickish Id) {- expr -}
                   -- ^ Annotate the enclosed frame. Used by the profiler.
+  deriving (Functor, Foldable, Traversable)
 
 -- | The end of a continuation. After arguments and casts are applied, we can
 -- do two things to a value: Return it to the calling context or perform a case
@@ -133,6 +144,7 @@ data End b      = Return
                   -- ^ Pass to the bound continuation.
                 | Case {- expr -} b [Alt b]
                   -- ^ Perform case analysis on the value.
+  deriving (Functor, Foldable, Traversable)
 
 -- | A general computation. A command brings together a list of bindings and
 -- either:
@@ -143,12 +155,14 @@ data End b      = Return
 data Command b = Let (Bind b) (Command b)
                | Eval (Term b) [Frame b] (End b)
                | Jump [Arg b] JoinId
+  deriving (Functor, Foldable, Traversable)
 
 -- | A parameterized continuation, otherwise known as a join point. Where a
 -- regular continuation represents the context of a single expression, a
 -- join point is a point in the control flow that many different computations
 -- might jump to.
 data Join b     = Join [b] (Command b)
+  deriving (Functor, Foldable, Traversable)
 
 -- | The identifier for a join point.
 type JoinId = Id
@@ -156,15 +170,18 @@ type JoinId = Id
 -- | The binding of one identifier to one term or continuation.
 data BindPair b = BindTerm b (Term b)
                 | BindJoin b (Join b)
+  deriving (Functor, Foldable, Traversable)
 
 -- | A binding. Similar to the @Bind@ datatype from GHC. Can be either a single
 -- non-recursive binding or a mutually recursive block.
 data Bind b     = NonRec (BindPair b) -- ^ A single non-recursive binding.
                 | Rec [BindPair b]    -- ^ A block of mutually recursive bindings.
+  deriving (Functor, Foldable, Traversable)
 
 -- | A case alternative. Given by the head constructor (or literal), a list of
 -- bound variables (empty for a literal), and the body as a 'Command'.
 data Alt b      = Alt AltCon [b] (Command b)
+  deriving (Functor, Foldable, Traversable)
 
 -- | The frames and end from an Eval, together forming a continuation.
 type Kont b     = ([Frame b], End b)
@@ -212,6 +229,9 @@ mkVarArg x | Type.isTyVar x = Type (Type.mkTyVarTy x)
            | Coercion.isCoVar x = Coercion (mkCoVarCo x)
            | otherwise = Var x
 
+mkVarApps :: Term b -> [Var] -> Command b
+mkVarApps term vars = Eval term (map (App . mkVarArg) vars) Return
+
 -- | Wrap a term in a series of lambdas.
 mkLambdas :: [b] -> Term b -> Term b
 mkLambdas = flip (foldr Lam)
@@ -233,9 +253,23 @@ mkComputeEval v fs = mkCompute ty (Eval v fs Return)
   where
     ty = foldl frameType (termType v) fs
 
+{-# SPECIALIZE mkComputeEval :: SeqCoreTerm   -> [SeqCoreFrame]   -> SeqCoreTerm   #-}
+{-# SPECIALIZE mkComputeEval :: Tagged Term t -> [Tagged Frame t] -> Tagged Term t #-}
+
 -- | Forms a term comprising the application of several arguments to a term.
 mkAppTerm :: HasId b => Term b -> [Term b] -> Term b
 mkAppTerm fun args = mkComputeEval fun (map App args)
+
+{-# SPECIALIZE mkAppTerm :: SeqCoreTerm   -> [SeqCoreTerm]   -> SeqCoreTerm   #-}
+{-# SPECIALIZE mkAppTerm :: Tagged Term t -> [Tagged Term t] -> Tagged Term t #-}
+
+-- | Forms a term comprising the application of several variables to a term.
+-- See 'mkAppTerm' and 'mkVarArg'.
+mkVarAppTerm :: HasId b => Term b -> [Var] -> Term b
+mkVarAppTerm fun args = mkAppTerm fun (map mkVarArg args)
+
+{-# SPECIALIZE mkVarAppTerm :: SeqCoreTerm   -> [Var] -> SeqCoreTerm   #-}
+{-# SPECIALIZE mkVarAppTerm :: Tagged Term t -> [Var] -> Tagged Term t #-}
 
 -- | Forms a term that casts the given term with the given coercion. 
 mkCast :: Term b -> Coercion -> Term b
@@ -253,9 +287,12 @@ mkCast term co
     ty = pSnd (coercionKind co)
 
 -- | Builds a term that applies a constructor to some arguments.
-mkConstruction :: HasId b => DataCon -> [Type] -> [Term b] -> Term b
+mkConstruction :: DataCon -> [Type] -> [Term b] -> Term b
 mkConstruction dc tyArgs valArgs
-  = mkAppTerm (Var (dataConWorkId dc)) (map Type tyArgs ++ valArgs)
+  = Compute ty $ Eval (Var (dataConWorkId dc)) (map App args) Return
+  where
+    args = map Type tyArgs ++ valArgs
+    ty   = dataConRepType dc `applyTypeToArgs` args
 
 -- | Builds a command that applies a constructor to some arguments.
 mkConstructionCommand :: DataCon -> [Type] -> [Term b] -> Command b
@@ -289,13 +326,63 @@ addNonRec pair comm
 --
 -- All the bindings must be term bindings; moving join bindings inside a Compute
 -- is in general not safe.
-addLetsToTerm :: [SeqCoreBind] -> SeqCoreTerm -> SeqCoreTerm
+addLetsToTerm :: HasId b => [Bind b] -> Term b -> Term b
 addLetsToTerm [] term = term
 addLetsToTerm binds term
   = assert (all bindsTerm (flattenBinds binds)) $
     case term of
       Compute ty comm -> Compute ty (addLets binds comm)
       _               -> Compute (termType term) (addLets binds $ Eval term [] Return)
+
+mkTickTerm :: Tickish Id -> SeqCoreTerm -> SeqCoreTerm
+mkTickTerm t (Var x)
+  | Type.isFunTy (idType x) = wrapTick t
+  | otherwise
+  = if tickishCounts t
+       then if tickishScoped t && tickishCanSplit t
+               then wrapTick (mkNoScope t)
+               else wrapTick t
+       else Var x
+  where
+    wrapTick t' = Compute (idType x) $ Eval (Var x) [Tick t'] Return
+
+mkTickTerm t (Lit lit)
+  | not (tickishCounts t) = Lit lit
+
+mkTickTerm _ (Coercion co) = Coercion co
+
+mkTickTerm t (Lam x e)
+     -- if this is a type lambda, or the tick does not count entries,
+     -- then we can push the tick inside:
+  | not (isRuntimeVar x) || not (tickishCounts t) = Lam x (mkTickTerm t e)
+     -- if it is both counting and scoped, we split the tick into its
+     -- two components, keep the counting tick on the outside of the lambda
+     -- and push the scoped tick inside.  The point of this is that the
+     -- counting tick can probably be floated, and the lambda may then be
+     -- in a position to be beta-reduced.
+  | tickishScoped t && tickishCanSplit t
+         = Compute ty $
+           Eval (Lam x (mkTickTerm (mkNoCount t) e)) [Tick (mkNoScope t)] Return
+     -- just a counting tick: leave it on the outside
+  | otherwise        = Compute ty $ Eval (Lam x e) [Tick t] Return
+  where
+    ty = termType (Lam x e)
+
+mkTickTerm t (Compute ty comm) = Compute ty (mkTickCommand t comm)
+
+mkTickTerm t other = Compute (termType other) $ Eval other [Tick t] Return
+
+mkTickCommand :: Tickish Id -> SeqCoreCommand -> SeqCoreCommand
+mkTickCommand t comm
+  = warnPprTrace True __FILE__ __LINE__
+                 (text "mkTickCommand not implemented; discarding" <+> ppr t)
+                 comm
+
+tickHNFArgs :: Tickish Id -> SeqCoreTerm -> SeqCoreTerm
+tickHNFArgs t term
+  = warnPprTrace True __FILE__ __LINE__
+                 (text "tickHNFArgs not implemented; discarding" <+> ppr t)
+                 term
 
 --------------------------------------------------------------------------------
 -- Deconstructors
@@ -432,6 +519,9 @@ isTrivial (Let {})       = False
 isTrivial (Eval term frames end) = isReturn end && isTrivialTerm term && all isTrivialFrame frames
 isTrivial (Jump args _)  = all isTrivialTerm args
 
+{-# SPECIALIZE isTrivial :: SeqCoreCommand   -> Bool #-}
+{-# SPECIALIZE isTrivial :: Tagged Command t -> Bool #-}
+
 -- | True if the given term is so simple we can duplicate it freely. Some
 -- literals are not trivial, and a lambda whose argument is not erased or whose
 -- body is non-trivial is also non-trivial.
@@ -441,6 +531,9 @@ isTrivialTerm (Lam x t)   = not (isRuntimeVar (identifier x)) && isTrivialTerm t
 isTrivialTerm (Compute _ c)  = isTrivial c
 isTrivialTerm _           = True
 
+{-# SPECIALIZE isTrivialTerm :: SeqCoreTerm   -> Bool #-}
+{-# SPECIALIZE isTrivialTerm :: Tagged Term t -> Bool #-}
+
 -- | True if the given continuation is so simple we can duplicate it freely.
 -- This is true of casts and of applications of erased arguments (types and
 -- coercions). Ticks are not considered trivial, since this would cause them to
@@ -448,6 +541,9 @@ isTrivialTerm _           = True
 isTrivialKont :: HasId b => Kont b -> Bool
 isTrivialKont (fs, Return) = all isTrivialFrame fs
 isTrivialKont _            = False
+
+{-# SPECIALIZE isTrivialKont :: SeqCoreKont         -> Bool #-}
+{-# SPECIALIZE isTrivialKont :: Kont (TaggedBndr t) -> Bool #-}
 
 -- | True if the given frame is so simple we can duplicate it freely. This is
 -- true of casts and of erased applications (types and coercions). Ticks are not
@@ -457,12 +553,18 @@ isTrivialFrame (App v)  = isTyCoArg v
 isTrivialFrame (Cast _) = True
 isTrivialFrame (Tick _) = False
 
+{-# SPECIALIZE isTrivialFrame :: SeqCoreFrame   -> Bool #-}
+{-# SPECIALIZE isTrivialFrame :: Tagged Frame t -> Bool #-}
+
 -- | True if the given join point is so simple we can duplicate it freely. All
 -- the arguments must be types or coercions and the body must itself be
 -- trivial.
 isTrivialJoin :: HasId b => Join b -> Bool
 isTrivialJoin (Join xs comm) = all (not . isRuntimeVar) (identifiers xs)
                             && isTrivial comm
+
+{-# SPECIALIZE isTrivialJoin :: SeqCoreJoin   -> Bool #-}
+{-# SPECIALIZE isTrivialJoin :: Tagged Join t -> Bool #-}
 
 -- | True if the given continuation is a return continuation, @Kont [] (Return _)@.
 isReturnKont :: Kont b -> Bool
@@ -494,12 +596,12 @@ commandAsSaturatedCall (Jump {})
   = Nothing
 
 -- | True if a term is simply a saturated application of a data constructor.
-termIsConstruction :: HasId b => Term b -> Bool
+termIsConstruction :: Term b -> Bool
 termIsConstruction = isJust . termAsConstruction
 
 -- | If a term is a saturated application of a data construtor, extract the
 -- constructor and the type and value arguments it's applied to.
-termAsConstruction :: HasId b => Term b -> Maybe (DataCon, [Type], [Term b])
+termAsConstruction :: Term b -> Maybe (DataCon, [Type], [Term b])
 termAsConstruction (Var id)      | Just dc <- isDataConWorkId_maybe id
                                  , dataConRepArity dc == 0
                                  , null (dataConUnivTyVars dc)
@@ -598,6 +700,37 @@ mapBindersOfBind f bind
     doPair pair = pair `setPairBinder` f (binderOfPair pair)
 
 --------------------------------------------------------------------------------
+-- Tagged Binders
+--------------------------------------------------------------------------------
+
+-- | A class of types that contain an identifier. Used to abstract over tagged
+-- vs. untagged binders.
+class HasId a where
+  -- | The identifier contained by the type @a@.
+  identifier :: a -> Id
+
+  -- | Extract the identifiers from a list of @a@.
+  identifiers :: [a] -> [Id]
+  identifiers = map identifier
+
+instance HasId Var where
+  identifier x = x
+  identifiers xs = xs
+
+instance HasId (TaggedBndr t) where
+  identifier (TB bndr _) = bndr
+
+type Tagged expr t   = expr (TaggedBndr t)
+type TaggedProgram t = Program (TaggedBndr t) -- can't partially apply type syn
+type TaggedKont t    = Kont (TaggedBndr t)
+
+deTag :: (Functor f, HasId b) => f b -> f Var
+deTag = fmap identifier
+
+{-# SPECIALIZE deTag :: HasId b => Term b -> SeqCoreTerm #-}
+{-# SPECIALIZE deTag :: Tagged Term t -> SeqCoreTerm #-}
+
+--------------------------------------------------------------------------------
 -- Calculations
 --------------------------------------------------------------------------------
 
@@ -610,14 +743,19 @@ termType (Compute ty _) = ty
 -- see exprType in GHC CoreUtils
 termType _other         = alphaTy
 
+{-# SPECIALIZE termType :: SeqCoreTerm -> Type #-}
+{-# SPECIALIZE termType :: Tagged Term t -> Type #-}
+
 -- | Compute the type of a frame's output, given the type of its input. (The
 --   input type of a type application is not uniquely defined, so it must be
 --   specified.)
 frameType :: HasId b => Type -> Frame b -> Type
-frameType ty (App (Type argTy)) = ty `Type.applyTy` argTy
-frameType ty (App _)            = Type.funResultTy ty
-frameType _  (Cast co)          = pSnd (coercionKind co)
-frameType ty (Tick _)           = ty
+frameType ty (App arg) = ty `applyTypeToArg` arg
+frameType _  (Cast co) = pSnd (coercionKind co)
+frameType ty (Tick _)  = ty
+
+{-# SPECIALIZE frameType :: Type -> SeqCoreFrame -> Type #-}
+{-# SPECIALIZE frameType :: Type -> Tagged Frame t -> Type #-}
 
 -- | Compute the result type if a value of the given type (assumed to be a
 -- function or forall) is applied to the given argument.
@@ -688,6 +826,9 @@ commandIsBottom _          = False
 -- inline it. (See Note [exprIsWorkFree] in CoreUtils.)
 termIsWorkFree :: HasId b => Term b -> Bool
 termIsWorkFree = termWF 0
+
+{-# SPECIALIZE termIsWorkFree :: SeqCoreTerm   -> Bool #-}
+{-# SPECIALIZE termIsWorkFree :: Tagged Term t -> Bool #-}
 
 termWF :: HasId b => Int -> Term b -> Bool
   -- termWF n v == is v work-free when its continuation applies n value args?
@@ -815,11 +956,21 @@ termIsCheap      = termCheap isCheapApp
 -- | See comments on exprIsExpandable in CoreUtils.
 termIsExpandable = termCheap isExpandableApp
 
+{-# SPECIALIZE termIsCheap      :: SeqCoreTerm   -> Bool #-}
+{-# SPECIALIZE termIsCheap      :: Tagged Term t -> Bool #-}
+{-# SPECIALIZE termIsExpandable :: SeqCoreTerm   -> Bool #-}
+{-# SPECIALIZE termIsExpandable :: Tagged Term t -> Bool #-}
+
 commandIsCheap, commandIsExpandable :: HasId b => Command b -> Bool
 -- | See comments on exprIsCheap in CoreUtils.
 commandIsCheap      = commCheap isCheapApp
 -- | See comments on exprIsExpandable in CoreUtils.
 commandIsExpandable = commCheap isExpandableApp
+
+{-# SPECIALIZE commandIsCheap      :: SeqCoreCommand   -> Bool #-}
+{-# SPECIALIZE commandIsCheap      :: Tagged Command t -> Bool #-}
+{-# SPECIALIZE commandIsExpandable :: SeqCoreCommand   -> Bool #-}
+{-# SPECIALIZE commandIsExpandable :: Tagged Command t -> Bool #-}
 
 -- | A type for predicates that determine whether an application is cheap, given
 -- the id of the function and the number of value arguments. See 'termIsCheapBy'
@@ -911,6 +1062,45 @@ commandIsCheapBy :: HasId b => CheapAppMeasure -> Command b -> Bool
 termIsCheapBy    = termCheap
 commandIsCheapBy = commCheap
 
+{-# SPECIALIZE termIsCheapBy :: CheapAppMeasure -> SeqCoreTerm   -> Bool #-}
+{-# SPECIALIZE termIsCheapBy :: CheapAppMeasure -> Tagged Term t -> Bool #-}
+{-# SPECIALIZE commandIsCheapBy :: CheapAppMeasure -> SeqCoreCommand   -> Bool #-}
+{-# SPECIALIZE commandIsCheapBy :: CheapAppMeasure -> Tagged Command t -> Bool #-}
+
+termIsHNF, termIsConLike :: SeqCoreTerm -> Bool
+-- | exprIsHNF returns true for expressions that are certainly /already/
+-- evaluated to /head/ normal form. See 'CoreUtils.exprIsHNF' for details.
+termIsHNF     = termIsHNFLike isDataConWorkId isEvaldUnfolding
+-- | Similar to 'exprIsHNF' but includes CONLIKE functions as well as
+-- data constructors. Conlike arguments are considered interesting by the
+-- inliner. See 'CoreUtils.exprIsConLike' for details.
+termIsConLike = termIsHNFLike isConLikeId isConLikeUnfolding
+
+termIsHNFLike :: (Var -> Bool) -> (Unfolding -> Bool) -> SeqCoreTerm -> Bool
+termIsHNFLike isCon isHNFUnf term
+  = isHNFLike term []
+  where
+    isHNFLike _                fs | hasTick fs = False
+    isHNFLike (Var id)         fs = isCon id
+                                 || isHNFUnf (idUnfolding id)
+                                 || idArity id > count isRuntimeApp fs
+    isHNFLike (Lit {})         _  = True
+    isHNFLike (Coercion {})    _  = True
+    isHNFLike (Type {})        _  = True
+    isHNFLike (Lam x body)     fs = isId x || isHNFLike body fs
+    isHNFLike (Compute _ comm) _  = isHNFLikeComm comm
+    
+    isHNFLikeComm (Let _ comm)  = isHNFLikeComm comm
+    isHNFLikeComm (Jump _ j)    = isCon j -- emphasis on constructor-*like*
+    isHNFLikeComm (Eval v fs Return) = isHNFLike v fs
+    isHNFLikeComm _             = False
+    
+    isRuntimeApp (App (Type _)) = False
+    isRuntimeApp (App _)        = True
+    isRuntimeApp _              = False
+    
+    hasTick fs = or [ tickishCounts ti | Tick ti <- fs ]
+
 --------------------------------------------------------------------------------
 -- Continuation ids
 --------------------------------------------------------------------------------
@@ -950,21 +1140,6 @@ cheapEqCommand (Eval v1 fs1 Return) (Eval v2 fs2 Return)
   = cheapEqTerm v1 v2 && and (zipWith cheapEqFrame fs1 fs2)
 cheapEqCommand _                    _
   = False
-
--- | A class of types that contain an identifier. Useful so that we can compare,
--- say, elements of @Command b@ for any @b@ that wraps an identifier with
--- additional information.
-class HasId a where
-  -- | The identifier contained by the type @a@.
-  identifier :: a -> Id
-  
-  -- | Extract the identifiers from a list of @a@.
-  identifiers :: [a] -> [Id]
-  identifiers = map identifier
-
-instance HasId Var where
-  identifier x = x
-  identifiers xs = xs
 
 -- | The type of the environment of an alpha-equivalence comparison. Only needed
 -- by user code if two terms need to be compared under some assumed

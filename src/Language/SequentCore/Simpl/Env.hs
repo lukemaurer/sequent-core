@@ -87,7 +87,7 @@ import qualified CoreSubst
 import CoreSyn    ( Tickish(Breakpoint)
                   , UnfoldingGuidance(..), UnfoldingSource(..)
                   , hasSomeUnfolding, isCompulsoryUnfolding, isStableSource, mkOtherCon
-                  , tickishCounts, tickishIsCode )
+                  , tickishIsCode )
 import qualified CoreSyn as Core
 import CoreUnfold ( CallCtxt(..), mkCoreUnfolding, mkDFunUnfolding )
 import DataCon
@@ -457,44 +457,44 @@ always = UnfWhen { ug_unsat_ok = True, ug_boring_ok = True }
 
 mkTermDef :: SimplEnv -> TopLevelFlag -> OutTerm -> Definition
 mkTermDef env level term
-  = mkBoundToTerm env (dynFlags env) term InlineRhs level False
+  = mkBoundToTerm (dynFlags env) term InlineRhs level False
 
 mkJoinDef :: SimplEnv -> OutJoin -> Definition
 mkJoinDef env join
-  = mkBoundToJoin env (dynFlags env) join InlineRhs
+  = mkBoundToJoin (dynFlags env) join InlineRhs
 
-mkBoundToTerm :: SimplEnv -> DynFlags -> OutTerm -> UnfoldingSource -> TopLevelFlag
+mkBoundToTerm :: DynFlags -> OutTerm -> UnfoldingSource -> TopLevelFlag
               -> Bool -> Definition
-mkBoundToTerm env dflags term src level bottoming
+mkBoundToTerm dflags term src level bottoming
   | isTopLevel level, bottoming, not (isTrivialTerm term)
   = NoDefinition
   | otherwise
-  = mkBoundToTermWithGuidance env term src level arity guid
+  = mkBoundToTermWithGuidance term src level arity guid
   where (arity, guid) = mkTermGuidance dflags term
 
-mkBoundToJoin :: SimplEnv -> DynFlags -> OutJoin -> UnfoldingSource
+mkBoundToJoin :: DynFlags -> OutJoin -> UnfoldingSource
               -> Definition
-mkBoundToJoin env dflags join src
-  = mkBoundToJoinWithGuidance env join src arity guid
+mkBoundToJoin dflags join src
+  = mkBoundToJoinWithGuidance join src arity guid
   where (arity, guid) = mkJoinGuidance dflags join
 
-mkBoundToTermWithGuidance :: SimplEnv -> OutTerm -> UnfoldingSource -> TopLevelFlag
+mkBoundToTermWithGuidance :: OutTerm -> UnfoldingSource -> TopLevelFlag
                           -> Arity -> UnfoldingGuidance -> Definition
-mkBoundToTermWithGuidance env term src level arity guid
+mkBoundToTermWithGuidance term src level arity guid
   = BoundToTerm { def_term         = occurAnalyseTerm term
                 , def_src          = src
                 , def_level        = level
                 , def_guidance     = guid
                 , def_arity        = arity
                 , def_isExpandable = termIsExpandable term
-                , def_isValue      = termIsHNF env term
+                , def_isValue      = termIsHNF term
                 , def_isWorkFree   = termIsWorkFree term
-                , def_isConLike    = termIsConLike env term
+                , def_isConLike    = termIsConLike term
                 }
 
-mkBoundToJoinWithGuidance :: SimplEnv -> OutJoin -> UnfoldingSource
+mkBoundToJoinWithGuidance :: OutJoin -> UnfoldingSource
                           -> Arity -> UnfoldingGuidance -> Definition
-mkBoundToJoinWithGuidance _env join src arity guid
+mkBoundToJoinWithGuidance join src arity guid
   = BoundToJoin { def_join         = occurAnalyseJoin join
                 , def_src          = src
                 , def_guidance     = guid
@@ -1384,39 +1384,6 @@ defToUnfolding (BoundToTerm { def_src = src, def_term = term, def_level = lev, d
       (termArity term) guid
 defToUnfolding (BoundToDFun { dfun_bndrs = bndrs, dfun_dataCon = con, dfun_args = args})
   = mkDFunUnfolding bndrs con (map termToCoreExpr args)
-
--- TODO This might be in Syntax, but since we're not storing our "unfoldings" in
--- ids, we rely on the environment to tell us whether a variable has been
--- evaluated.
-
-termIsHNF, termIsConLike :: SimplEnv -> SeqCoreTerm -> Bool
-termIsHNF     env = termIsHNFLike isDataConWorkId defIsEvald env
-termIsConLike env = termIsHNFLike isConLikeId defIsConLike env
-
-termIsHNFLike :: (Var -> Bool) -> (Definition -> Bool) -> SimplEnv -> SeqCoreTerm -> Bool
-termIsHNFLike isCon isHNFDef env term
-  = isHNFLike term []
-  where
-    isHNFLike _                fs | hasTick fs = False
-    isHNFLike (Var id)         fs = isCon id
-                                 || isHNFDef (findDef env id)
-                                 || idArity id > count isRuntimeApp fs
-    isHNFLike (Lit {})         _  = True
-    isHNFLike (Coercion {})    _  = True
-    isHNFLike (Type {})        _  = True
-    isHNFLike (Lam x body)     fs = isId x || isHNFLike body fs
-    isHNFLike (Compute _ comm) _  = isHNFLikeComm comm
-    
-    isHNFLikeComm (Let _ comm)  = isHNFLikeComm comm
-    isHNFLikeComm (Jump _ j)    = isCon j -- emphasis on constructor-*like*
-    isHNFLikeComm (Eval v fs Return) = isHNFLike v fs
-    isHNFLikeComm _             = False
-    
-    isRuntimeApp (App (Type _)) = False
-    isRuntimeApp (App _)        = True
-    isRuntimeApp _              = False
-    
-    hasTick fs = or [ tickishCounts ti | Tick ti <- fs ]
 
 defIsEvald :: Definition -> Bool
 defIsEvald (NotAmong _) = True

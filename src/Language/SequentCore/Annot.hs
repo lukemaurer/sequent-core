@@ -28,7 +28,6 @@ import Language.SequentCore.Syntax
 import Language.SequentCore.Util
 
 import Coercion
-import CoreSyn  ( Tickish )
 import Id
 import Literal
 import Type

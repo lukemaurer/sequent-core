@@ -742,13 +742,13 @@ simplDef env dsc csc top_lvl id new_pair def
                         -- for dfuns for single-method classes; see
                         -- Note [Single-method classes] in TcInstDcls.
                         -- A test case is Trac #4138
-                        in return (mkBoundToTermWithGuidance env term' src top_lvl arity guide')
+                        in return (mkBoundToTermWithGuidance term' src top_lvl arity guide')
                             -- See Note [Top-level flag on inline rules] in CoreUnfold
 
                   _other              -- Happens for INLINABLE things
                      -> bottoming `seq` -- See Note [Force bottoming field]
                         do { let dflags = dynFlags env
-                           ; return (mkBoundToTerm env dflags term' src top_lvl bottoming) } }
+                           ; return (mkBoundToTerm dflags term' src top_lvl bottoming) } }
                 -- If the guidance is UnfIfGoodArgs, this is an INLINABLE
                 -- unfolding, and we need to make sure the guidance is kept up
                 -- to date with respect to any changes in the unfolding.
@@ -760,20 +760,20 @@ simplDef env dsc csc top_lvl id new_pair def
               ; case guide of
                   UnfWhen {}
                      -> let guide' = guide { ug_boring_ok = joinInlineBoringOk join' }
-                        in return (mkBoundToJoinWithGuidance env join' src arity guide')
+                        in return (mkBoundToJoinWithGuidance join' src arity guide')
 
                   _other
                      -> bottoming `seq`
                         do { let dflags = dynFlags env
-                           ; return (mkBoundToJoin env dflags join' src) } }
+                           ; return (mkBoundToJoin dflags join' src) } }
 
       _other -> bottoming `seq`
                 do { let dflags = dynFlags env
                    ; case new_pair of
                        BindTerm _ term ->
-                         return (mkBoundToTerm env dflags term InlineRhs top_lvl bottoming)
+                         return (mkBoundToTerm dflags term InlineRhs top_lvl bottoming)
                        BindJoin _ join ->
-                         return (mkBoundToJoin env dflags join InlineRhs) }
+                         return (mkBoundToJoin dflags join InlineRhs) }
                      -- We make an  unfolding *even for loop-breakers*.
                      -- Reason: (a) It might be useful to know that they are WHNF
                      --         (b) In TidyPgm we currently assume that, if we want to
@@ -1306,7 +1306,7 @@ simplKontAfterRules env dsc csc ai (Case case_bndr [Alt _ bndrs rhs])
         ; addingFloats flts $ simplCommand env' dsc' csc rhs }
   where
     elim_lifted   -- See Note [Case elimination: lifted case]
-      = termIsHNF env scrut
+      = termIsHNF scrut
      || (is_plain_seq && ok_for_spec)
               -- Note: not the same as exprIsHNF
      || case_bndr_evald_next rhs

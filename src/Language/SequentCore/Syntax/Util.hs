@@ -21,7 +21,10 @@ module Language.SequentCore.Syntax.Util (
   termFreeVars,
 
   -- * Uniquification
-  uniquifyProgram
+  uniquifyProgram,
+  
+  -- * Floats
+  FloatBind(..), wrapFloat, wrapTermInFloat
 ) where
 
 import Language.SequentCore.FVs
@@ -368,3 +371,22 @@ uniquifyProgram prgm
                               return $ Rec (zipWith setPairBinder pairs' bndrs')
 
     doAlt (Alt con bndrs rhs) = Alt con <$> mapM doBndr bndrs <*> doComm rhs
+
+------------
+-- Floats --
+------------
+
+data FloatBind
+  = FloatLet  SeqCoreBind -- INVARIANT: Term bindings only (joins don't float!)
+  | FloatCase SeqCoreTerm Id AltCon [Var]
+
+wrapFloat :: FloatBind -> SeqCoreCommand -> SeqCoreCommand
+wrapFloat (FloatLet bind) comm = Let bind comm
+wrapFloat (FloatCase term caseBndr con bndrs) comm
+  = Eval term [] $ Case caseBndr [Alt con bndrs comm]
+
+wrapTermInFloat :: FloatBind -> SeqCoreTerm -> SeqCoreTerm
+wrapTermInFloat float (Compute ty comm)
+  = Compute ty (wrapFloat float comm)
+wrapTermInFloat float term
+  = Compute (termType term) (wrapFloat float (Eval term [] Return))
