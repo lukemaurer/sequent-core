@@ -9,8 +9,11 @@
 -- Provides a sanity check for Sequent Core transformations in the tradition of
 -- CoreLint.
 
-module Language.SequentCore.Lint ( lintCoreBindings, lintTerm ) where
+module Language.SequentCore.Lint (
+  lintCoreBindings, lintTerm, assertLintProgram
+) where
 
+import Language.SequentCore.Pretty
 import Language.SequentCore.Syntax
 import Language.SequentCore.WiredIn
 
@@ -102,6 +105,12 @@ lintCoreBindings binds = eitherToMaybe $ foldM lintCoreTopBind initEnv binds
   where
     -- All top-level bindings are considered visible (see CoreLint.lintCoreBindings)
     initEnv = extendTermEnvList emptyTermEnv (flattenBinds binds)
+
+assertLintProgram :: String -> SDoc -> [SeqCoreBind] -> [SeqCoreBind]
+assertLintProgram msg extraDoc binds
+  = case lintCoreBindings binds of
+      Nothing   -> binds
+      Just errs -> pprPanic msg (errs $$ pprTopLevelBinds binds $$ extraDoc)
 
 lintTerm :: TvSubst -> SeqCoreTerm -> Maybe SDoc
 lintTerm env term = eitherToMaybe $ lintCoreTerm env term 

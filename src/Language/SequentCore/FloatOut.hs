@@ -19,6 +19,7 @@
 module Language.SequentCore.FloatOut ( floatOutwards, plugin ) where
 
 import Language.SequentCore.Arity
+import Language.SequentCore.FloatOut.Flags
 import Language.SequentCore.FloatOut.SetLevels
 import Language.SequentCore.Plugin
 import Language.SequentCore.Syntax
@@ -30,7 +31,7 @@ import CoreMonad        ( FloatOutSwitches(..)
                         , defaultPlugin, reinitializeGlobals )
 import DynFlags
 import HscTypes         ( ModGuts(..) )
-import ErrUtils         ( dumpIfSet_dyn )
+import ErrUtils         ( dumpIfSet_dyn, errorMsg )
 import Id               ( Id, idArity, isBottomingId )
 import Var              ( Var )
 import UniqSupply       ( UniqSupply, getUniqueSupplyM )
@@ -42,6 +43,7 @@ import FastString
 import MonadUtils       ( liftIO )
 
 import Control.Applicative ( (<$>), (<*>), pure )
+import Control.Monad
 import Control.Monad.Trans.Writer.Lazy
 import qualified Data.IntMap as M
 import Data.Monoid
@@ -52,29 +54,73 @@ import Data.Monoid
 
 plugin :: Plugin
 plugin = defaultPlugin {
-  installCoreToDos = \_ todos -> do
+  installCoreToDos = \cmdLine todos -> do
     reinitializeGlobals
-    let todos' = replace todos
+    let cmdLine' = concatMap words cmdLine
+          -- Allow -fplugin-opt=plugin:"opt1 opt2"
+    (fflags, leftovers, warns) <- parseFloatFlags cmdLine'
+    dflags <- getDynFlags
+    unless (null leftovers) $
+      liftIO $ errorMsg dflags $
+        text "Leftover options to Language.SequentCore.FloatOut:" $$
+        vcat (map text leftovers)
+    unless (null warns) $
+      liftIO $ errorMsg dflags $ vcat (map text warns)
+    let todos' = replace fflags todos
     return todos'
 } where
-  replace (CoreDoFloatOutwards switches : todos)
-    = newPass switches : replace todos
-  replace (CoreDoPasses todos1 : todos2)
-    = CoreDoPasses (replace todos1) : replace todos2
-  replace (todo : todos)
-    = todo : replace todos
-  replace []
-    = []
+  replace fflags = go
+    where
+      go (CoreDoFloatOutwards switches : todos)
+        = normalPass switches : go todos
+      go (CoreDoPasses todos1 : todos2)
+        = CoreDoPasses (go todos1) : go todos2
+      go (todo : todos)
+        = todo : go todos
+      go []
+        | fgopt Opt_LLF fflags
+        = [finalPass]
+        | otherwise
+        = []
 
-  newPass switches
-    = CoreDoPluginPass "Float out (Sequent Core)" (runFloatOut switches)
+      normalPass switches
+        = CoreDoPluginPass "Float out (Sequent Core)"
+                           (runFloatOut switches fflags Nothing)
 
-runFloatOut :: FloatOutSwitches -> ModGuts -> CoreM ModGuts
-runFloatOut switches guts
+      finalPass
+        = CoreDoPluginPass "Late lambda-lifting (Sequent Core)"
+                           (runFloatOut switchesForFinal fflags
+                                        (Just finalPassSwitches) )
+
+      switchesForFinal = FloatOutSwitches
+        { floatOutLambdas             = lateFloatNonRecLam fflags
+        , floatOutConstants           = False
+        , floatOutPartialApplications = False
+        }
+
+      finalPassSwitches = FinalPassSwitches
+        { fps_trace          = doptDumpLateFloat          fflags
+        , fps_stabilizeFirst = fgopt Opt_LLF_Stabilize    fflags
+        , fps_rec            = lateFloatRecLam            fflags
+        , fps_absUnsatVar    = fgopt Opt_LLF_AbsUnsat     fflags
+        , fps_absSatVar      = fgopt Opt_LLF_AbsSat       fflags
+        , fps_absOversatVar  = fgopt Opt_LLF_AbsOversat   fflags
+        , fps_createPAPs     = fgopt Opt_LLF_CreatePAPs   fflags
+        , fps_ifInClo        = lateFloatIfInClo           fflags
+        , fps_cloGrowth      = lateFloatCloGrowth         fflags
+        , fps_cloGrowthInLam = lateFloatCloGrowthInLam    fflags
+        , fps_strictness     = fgopt Opt_LLF_UseStr       fflags
+        , fps_oneShot        = fgopt Opt_LLF_OneShot      fflags
+        }
+
+runFloatOut :: FloatOutSwitches -> FloatFlags -> Maybe FinalPassSwitches
+            -> ModGuts
+            -> CoreM ModGuts
+runFloatOut switches fflags final guts
   = do
     dflags <- getDynFlags
     us <- getUniqueSupplyM
-    sequentPass (liftIO . floatOutwards switches dflags us) guts
+    sequentPass (liftIO . floatOutwards switches final dflags fflags us) guts
 
 {-
         -----------------
@@ -158,13 +204,15 @@ Well, maybe.  We don't do this at the moment.
 
 -}
 floatOutwards :: FloatOutSwitches
+              -> Maybe FinalPassSwitches
               -> DynFlags
-              -> UniqSupply 
+              -> FloatFlags
+              -> UniqSupply
               -> SeqCoreProgram -> IO SeqCoreProgram
 
-floatOutwards float_sws dflags us pgm
+floatOutwards float_sws fps dflags fflags us pgm
   = do {
-        let { annotated_w_levels = setLevels float_sws pgm us ;
+        let { annotated_w_levels = setLevels dflags fflags float_sws fps pgm us ;
               (fss, binds_s')    = unzip (map floatTopBind annotated_w_levels)
             } ;
 

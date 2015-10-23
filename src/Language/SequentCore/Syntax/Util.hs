@@ -333,12 +333,30 @@ uniquifyProgram prgm
     doPair (BindTerm x term) = BindTerm x <$> doTerm term
     doPair (BindJoin j join) = BindJoin j <$> doJoin join
 
-    doBndr bndr
+    alteringSubst :: (Subst -> (Subst, a)) -> (a -> State Subst b) -> State Subst b
+    alteringSubst f k
       = do
         subst <- get
-        let (subst', bndr') = CoreSubst.substBndr subst bndr
+        let (subst', a) = f subst
         put subst'
-        return bndr'
+        ans <- k a
+        -- Now, restore the original substitution *but* keep the new, augmented
+        -- in-scope set
+        subst'' <- get
+        put $ CoreSubst.setInScope subst (CoreSubst.substInScope subst'')
+        return ans
+
+    doBndr :: Var -> (Var -> State Subst a) -> State Subst a
+    doBndr bndr k
+      = alteringSubst (flip CoreSubst.substBndr bndr) k
+
+    doBndrs :: [Var] -> ([Var] -> State Subst a) -> State Subst a
+    doBndrs bndrs k
+      = alteringSubst (flip CoreSubst.substBndrs bndrs) k
+
+    doRecBndrs :: [Var] -> ([Var] -> State Subst a) -> State Subst a
+    doRecBndrs bndrs k
+      = alteringSubst (flip CoreSubst.substRecBndrs bndrs) k
 
     doTerm (Lit lit) = return $ Lit lit
     doTerm (Type ty) = Type <$> (CoreSubst.substTy <$> get <*> pure ty)
@@ -346,31 +364,32 @@ uniquifyProgram prgm
     doTerm (Var var) = Var <$> (CoreSubst.substIdOcc <$> get <*> pure var)
     doTerm (Compute ty comm)
       = Compute <$> (CoreSubst.substTy <$> get <*> pure ty) <*> doComm comm
-    doTerm (Lam bndr body) = Lam <$> doBndr bndr <*> doTerm body
+    doTerm (Lam bndr body) = doBndr bndr $ \bndr' -> Lam bndr' <$> doTerm body
 
     doFrame (App arg) = App <$> doTerm arg
     doFrame (Cast co) = Cast <$> (CoreSubst.substCo <$> get <*> pure co)
     doFrame (Tick ti) = Tick <$> (CoreSubst.substTickish <$> get <*> pure ti)
 
     doEnd Return = return Return
-    doEnd (Case bndr alts) = Case <$> doBndr bndr <*> mapM doAlt alts
+    doEnd (Case bndr alts) = doBndr bndr $ \bndr' -> Case bndr' <$> mapM doAlt alts
 
-    doComm (Let bind body) = Let <$> doBind bind <*> doComm body
+    doComm (Let bind body) = doBind bind $ \bind' -> Let bind' <$> doComm body
     doComm (Eval term frames end) = Eval <$> doTerm term <*> mapM doFrame frames
                                                          <*> doEnd end
     doComm (Jump args j) = Jump <$> mapM doTerm args
                                 <*> (CoreSubst.substIdOcc <$> get <*> pure j)
 
-    doJoin (Join bndrs comm) = Join <$> mapM doBndr bndrs <*> doComm comm
+    doJoin (Join bndrs comm) = doBndrs bndrs $ \bndrs' -> Join bndrs' <$> doComm comm
 
-    doBind (NonRec pair) = do pair' <- doPair pair
-                              bndr' <- doBndr (binderOfPair pair)
-                              return $ NonRec (pair' `setPairBinder` bndr')
-    doBind (Rec pairs)   = do bndrs' <- mapM (doBndr . binderOfPair) pairs
-                              pairs' <- mapM doPair pairs
-                              return $ Rec (zipWith setPairBinder pairs' bndrs')
+    doBind :: SeqCoreBind -> (SeqCoreBind -> State Subst a) -> State Subst a
+    doBind (NonRec pair) k = do pair' <- doPair pair
+                                doBndr (binderOfPair pair) $ \bndr' ->
+                                  k $ NonRec (pair' `setPairBinder` bndr')
+    doBind (Rec pairs)   k = do doRecBndrs (map binderOfPair pairs) $ \bndrs' -> do
+                                  pairs' <- mapM doPair pairs
+                                  k $ Rec (zipWith setPairBinder pairs' bndrs')
 
-    doAlt (Alt con bndrs rhs) = Alt con <$> mapM doBndr bndrs <*> doComm rhs
+    doAlt (Alt con bndrs rhs) = doBndrs bndrs $ \bndrs' -> Alt con bndrs' <$> doComm rhs
 
 ------------
 -- Floats --
