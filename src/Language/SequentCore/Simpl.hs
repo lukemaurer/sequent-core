@@ -16,7 +16,7 @@ module Language.SequentCore.Simpl (plugin) where
 import Language.SequentCore.Arity
 import Language.SequentCore.Lint
 import Language.SequentCore.OccurAnal
-import Language.SequentCore.Pretty (pprTopLevelBinds, pprCoreKont)
+import Language.SequentCore.Pretty (pprTopLevelBinds, pprKont)
 import Language.SequentCore.Simpl.Env
 import Language.SequentCore.Simpl.Monad
 import Language.SequentCore.Simpl.Util
@@ -1660,7 +1660,7 @@ tryRules env rules fn args
           [ text "Rule:" <+> ftext (ruleName rule)
           , text "Before:" <+> hang (ppr fn) 2 (sep (map ppr $ take arity args))
           , text "After: " <+> ppr rule_rhs
-          , text "Cont:  " <+> pprCoreKont (map App $ drop arity args, Return) ]
+          , text "Cont:  " <+> pprKont (map App $ drop arity args, Return) ]
 
       | dopt Opt_D_dump_rule_firings dflags
       = log_rule dflags Opt_D_dump_rule_firings "Rule fired:" $

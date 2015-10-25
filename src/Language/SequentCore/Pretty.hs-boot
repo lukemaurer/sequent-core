@@ -1,14 +1,14 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-
-module Language.SequentCore.Pretty () where
+module Language.SequentCore.Pretty where
 
 import {-# SOURCE #-} Language.SequentCore.Syntax
 
 import Outputable
 
-instance OutputableBndr b => Outputable (Bind b)
-instance OutputableBndr b => Outputable (Term b)
-instance OutputableBndr b => Outputable (Command b)
-instance OutputableBndr b => Outputable (Frame b)
-instance OutputableBndr b => Outputable (End b)
-instance OutputableBndr b => Outputable (Alt b)
+pprTerm     :: OutputableBndr b => Term b     -> SDoc
+pprCommand  :: OutputableBndr b => Command b  -> SDoc
+pprFrame    :: OutputableBndr b => Frame b    -> SDoc
+pprEnd      :: OutputableBndr b => End b      -> SDoc
+pprAlt      :: OutputableBndr b => Alt b      -> SDoc
+pprJoin     :: OutputableBndr b => Join b     -> SDoc
+pprBind     :: OutputableBndr b => Bind b     -> SDoc
+pprBindPair :: OutputableBndr b => BindPair b -> SDoc

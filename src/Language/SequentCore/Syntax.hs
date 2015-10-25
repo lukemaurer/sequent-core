@@ -57,7 +57,7 @@ module Language.SequentCore.Syntax (
   (=~=), AlphaEq(..), AlphaEnv, HasId(..)
 ) where
 
-import {-# SOURCE #-} Language.SequentCore.Pretty ()
+import {-# SOURCE #-} Language.SequentCore.Pretty
 import Language.SequentCore.Util
 import Language.SequentCore.WiredIn
 
@@ -1296,3 +1296,33 @@ instance (AlphaEq a, AlphaEq b) => AlphaEq (Either a b) where
 
 instance HasId b => AlphaEq (Bind b) where
   aeqIn env b1 b2 = isJust $ aeqBindIn env b1 b2
+
+--------------------------------------------------------------------------------
+-- Output
+--------------------------------------------------------------------------------
+
+-- See Language.SequentCore.Pretty for implementations
+
+instance OutputableBndr b => Outputable (Bind b) where
+  ppr = pprBind
+
+instance OutputableBndr b => Outputable (BindPair b) where
+  ppr = pprBindPair
+
+instance OutputableBndr b => Outputable (Term b) where
+  ppr = pprTerm
+
+instance OutputableBndr b => Outputable (Command b) where
+  ppr = pprCommand
+
+instance OutputableBndr b => Outputable (Frame b) where
+  ppr = pprFrame
+
+instance OutputableBndr b => Outputable (End b) where
+  ppr = pprEnd
+
+instance OutputableBndr b => Outputable (Join b) where
+  ppr = pprJoin
+
+instance OutputableBndr b => Outputable (Alt b) where
+  ppr = pprAlt

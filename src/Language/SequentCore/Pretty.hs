@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-
 -- |
 -- Module      : Language.SequentCore.Pretty
 -- Description : Pretty printing of Sequent Core terms
@@ -10,7 +8,10 @@
 -- built-in pretty printer.
   
 module Language.SequentCore.Pretty (
-  pprTopLevelBinds, pprParendTerm, pprCoreKont
+  pprTopLevelBinds,
+
+  pprTerm, pprParendTerm, pprCommand, pprFrame, pprEnd, pprAlt, pprKont,
+  pprJoin, pprBind, pprBindPair
 ) where
 
 import Language.SequentCore.Syntax
@@ -20,6 +21,40 @@ import Outputable
 import PprCore ()
 
 import Data.List
+
+pprTerm :: OutputableBndr b => Term b -> SDoc
+pprTerm = ppr_term noParens
+
+pprParendTerm :: OutputableBndr b => Term b -> SDoc
+pprParendTerm = ppr_term parens
+
+pprCommand :: OutputableBndr b => Command b -> SDoc
+pprCommand = ppr_comm noParens
+
+pprFrame :: OutputableBndr b => Frame b -> SDoc
+pprFrame = ppr_frame
+
+pprEnd :: OutputableBndr b => End b -> SDoc
+pprEnd = ppr_end
+
+pprAlt :: OutputableBndr b => Alt b -> SDoc
+pprAlt = ppr_alt
+
+pprKont :: OutputableBndr b => Kont b -> SDoc
+pprKont = ppr_kont noParens
+
+pprJoin :: OutputableBndr b => Join b -> SDoc
+pprJoin = ppr_join noParens
+
+pprBind :: OutputableBndr b => Bind b -> SDoc
+pprBind = ppr_bind
+
+pprBindPair :: OutputableBndr b => BindPair b -> SDoc
+pprBindPair = ppr_binding
+
+--------------------
+-- Implementation --
+--------------------
 
 ppr_bind :: OutputableBndr b => Bind b -> SDoc
 ppr_bind (NonRec pair) = ppr_binding pair
@@ -67,10 +102,10 @@ ppr_comm add_par comm
     ppr_cut
       = case cut of
           Left (term, fs, end) 
-            -> sep [char '<' <> pprCoreTerm term,
+            -> sep [char '<' <> pprTerm term,
                     cat $ ppr_block (char '|') (char ';') (char '>') $ (ppr_kont_frames fs ++ [ppr_end end])]
           Right (args, j)
-            -> text "jump" <+> prefix <+> ppr j <+> parens (pprDeeper $ pprWithCommas pprCoreTerm args)
+            -> text "jump" <+> prefix <+> ppr j <+> parens (pprDeeper $ pprWithCommas pprTerm args)
             where prefix | GHC.isTyVar j     = text "TYVAR"
                          | GHC.isCoVar j     = text "COVAR"
                          | not (isJoinId j)  = text "IDVAR"
@@ -90,17 +125,17 @@ ppr_term add_par term@(Lam {})
   = add_par $
       hang (char '\\' <+> fsep (map (pprBndr LambdaBind) bndrs ++
                                 [char '|', parens (ppr_kont_bndr ty)]) <+> arrow)
-        2 (pprDeeper $ pprCoreComm comm)
+        2 (pprDeeper $ pprCommand comm)
   | otherwise
   = add_par $
       hang (char '\\' <+> fsep (map (pprBndr LambdaBind) bndrs) <+> arrow)
-        2 (pprDeeper $ pprCoreTerm body)
+        2 (pprDeeper $ pprTerm body)
   where
     (bndrs, body) = collectBinders term
 ppr_term add_par (Compute ty comm)
   = add_par $
       hang (text "compute" <+> parens (ppr_kont_bndr ty))
-        2 (pprCoreComm comm)
+        2 (pprCommand comm)
 
 ppr_kont_frames :: OutputableBndr b => [Frame b] -> [SDoc]
 ppr_kont_frames = map ppr_frame
@@ -120,7 +155,7 @@ ppr_end Return
   = text "ret"
 ppr_end (Case var alts)
   = hang (text "case as" <+> pprBndr LetBind var <+> text "of") 2 $ pprDeeper $
-      vcat $ ppr_block (char '{') (char ';') (char '}') (map pprCoreAlt alts)
+      vcat $ ppr_block (char '{') (char ';') (char '}') (map ppr_alt alts)
 
 ppr_kont :: OutputableBndr b => (SDoc -> SDoc) -> Kont b -> SDoc
 ppr_kont add_par (frames, end)
@@ -130,7 +165,7 @@ ppr_join :: OutputableBndr b => (SDoc -> SDoc) -> Join b -> SDoc
 ppr_join add_par (Join bndrs body)
   = add_par $
       hang (char '\\' <+> argTuple <+> arrow)
-        2 (pprCoreComm body)
+        2 (pprCommand body)
   where
     argTuple
       = case bndrs of
@@ -141,9 +176,9 @@ ppr_kont_bndr :: GHC.Type -> SDoc
 ppr_kont_bndr ty =
   text "ret" <+> dcolon <+> ppr ty
 
-pprCoreAlt :: OutputableBndr b => Alt b -> SDoc
-pprCoreAlt (Alt con args rhs)
- = hang (ppr_case_pat con args <+> arrow) 2 (pprCoreComm rhs)
+ppr_alt :: OutputableBndr b => Alt b -> SDoc
+ppr_alt (Alt con args rhs)
+ = hang (ppr_case_pat con args <+> arrow) 2 (pprCommand rhs)
 
 ppr_case_pat :: OutputableBndr a => GHC.AltCon -> [a] -> SDoc
 ppr_case_pat con args
@@ -151,41 +186,5 @@ ppr_case_pat con args
   where
     ppr_bndr = pprBndr CaseBind
 
-pprCoreComm :: OutputableBndr b => Command b -> SDoc
-pprCoreComm comm = ppr_comm noParens comm
-
-pprCoreTerm :: OutputableBndr b => Term b -> SDoc
-pprCoreTerm val = ppr_term noParens val
-
-pprCoreKont :: OutputableBndr b => Kont b -> SDoc
-pprCoreKont kont = ppr_kont noParens kont
-
-pprParendTerm :: OutputableBndr b => Term b -> SDoc
-pprParendTerm term = ppr_term parens term
-
 noParens :: SDoc -> SDoc
 noParens pp = pp
-
-instance OutputableBndr b => Outputable (Bind b) where
-  ppr = ppr_bind
-
-instance OutputableBndr b => Outputable (BindPair b) where
-  ppr = ppr_binding
-
-instance OutputableBndr b => Outputable (Term b) where
-  ppr = ppr_term noParens
-
-instance OutputableBndr b => Outputable (Command b) where
-  ppr = ppr_comm noParens
-
-instance OutputableBndr b => Outputable (Frame b) where
-  ppr = ppr_frame
-
-instance OutputableBndr b => Outputable (End b) where
-  ppr = ppr_end
-
-instance OutputableBndr b => Outputable (Join b) where
-  ppr = ppr_join noParens
-
-instance OutputableBndr b => Outputable (Alt b) where
-  ppr = pprCoreAlt
