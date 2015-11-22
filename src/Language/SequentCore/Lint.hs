@@ -60,6 +60,7 @@ type KontEnv = TvSubst
 type LintEnv = (TermEnv, KontEnv, OutType)
 
 type OutType = Type
+type OutVar = Var
 
 termEnv :: LintEnv -> TermEnv
 termEnv (env, _enk, _retTy) = env
@@ -78,7 +79,7 @@ emptyTermEnv = emptyTvSubst
 
 extendTermEnv :: TermEnv -> Var -> Term Var -> TermEnv
 extendTermEnv ent bndr _term
-  = extendTvInScope ent bndr
+  = extendTvInScope ent bndr -- FIXME Should substitute in type!
 
 extendTermEnvList :: TermEnv -> [BindPair Var] -> TermEnv
 extendTermEnvList ent pairs
@@ -108,6 +109,8 @@ lintCoreBindings binds = eitherToMaybe $ foldM lintCoreTopBind initEnv binds
 
 assertLintProgram :: String -> SDoc -> [SeqCoreBind] -> [SeqCoreBind]
 assertLintProgram msg extraDoc binds
+  | not debugIsOn = binds
+  | otherwise
   = case lintCoreBindings binds of
       Nothing   -> binds
       Just errs -> pprPanic msg (errs $$ pprTopLevelBinds binds $$ extraDoc)
@@ -119,21 +122,20 @@ lintCoreTopBind :: TermEnv -> SeqCoreBind -> LintM TermEnv
 lintCoreTopBind ent (NonRec (BindTerm bndr rhs))
   = do
     termTy <- lintCoreTerm ent rhs
-    checkRhsType bndr (idType bndr) termTy
-    let bndrTy = substTy ent (idType bndr)
-        bndr'  = bndr `setIdType` bndrTy
+    bndr' <- lintBndr ent bndr
+    checkRhsType bndr' (idType bndr') termTy
+      -- Can't have top-level tyvars, so no need to substitute
     return $ extendTermEnv ent bndr' rhs
 lintCoreTopBind ent (Rec pairs)
   | all bindsTerm pairs
   = do
-    let bndrs   = map binderOfPair pairs
-        bndrTys = map (substTy ent . idType) bndrs
-        bndrs'  = zipWith setIdType bndrs bndrTys
-        pairs'  = zipWith setPairBinder pairs bndrs'
-        ent'    = extendTermEnvList ent pairs'
+    bndrs' <- mapM (lintBndr ent . binderOfPair) pairs
+    let pairs' = zipWith setPairBinder pairs bndrs'
+        ent'   = extendTermEnvList ent pairs
     forM_ pairs' $ \(BindTerm bndr rhs) -> do
       termTy <- lintCoreTerm ent' rhs
       checkRhsType bndr (idType bndr) termTy
+        -- Can't have top-level tyvars, so no need to substitute
     return ent'
 lintCoreTopBind _ bind
   = Left $ text "Continuation binding at top level:" <+> ppr bind
@@ -141,22 +143,24 @@ lintCoreTopBind _ bind
 lintCoreBind :: LintEnv -> SeqCoreBind -> LintM LintEnv
 lintCoreBind env (NonRec pair)
   = do
-    let bndr   = binderOfPair pair
-        bndrTy = substTy (termEnv env) (idType bndr)
-        bndr'  = bndr `setIdType` bndrTy
-        pair'  = pair `setPairBinder` bndr'
-        env'   = extendLintEnv env pair'
+    bndr' <- lintBndr (termEnv env) (binderOfPair pair)
+    let pair' = pair `setPairBinder` bndr'
     lintCoreBindPair env pair'
-    return env'
+    return $ extendLintEnv env pair'
 lintCoreBind env (Rec pairs)
   = do
-    let bndrs   = map binderOfPair pairs
-        bndrTys = map (substTy (termEnv env) . idType) bndrs
-        bndrs'  = zipWith setIdType bndrs bndrTys
-        pairs'  = zipWith setPairBinder pairs bndrs'
+    bndrs' <- mapM (lintBndr (termEnv env) . binderOfPair) pairs
+    let pairs'  = zipWith setPairBinder pairs bndrs'
         env'    = extendLintEnvList env pairs'
     mapM_ (lintCoreBindPair env') pairs'
     return env'
+
+lintBndr :: TermEnv -> SeqCoreBndr -> LintM OutVar
+lintBndr ent bndr
+  = do
+    -- Could do more, but currently just checks for free tyvars
+    bndrTy <- lintType (text "binder:" <+> ppr bndr) ent (idType bndr)
+    return $ bndr `setIdType` bndrTy
 
 {-
 Note [Checking terms vs. continuations]
@@ -284,7 +288,7 @@ lintCoreCut env term kont
 lintCoreJump :: LintEnv -> [SeqCoreArg] -> JoinId -> LintM ()
 lintCoreJump env args j
   | Just j' <- lookupInScope (getTvInScope (kontEnv env)) j
-  = if | not (substTy (kontEnv env) (idType j) `eqType` idType j') ->
+  = if | not (substTy (termEnv env) (idType j) `eqType` idType j') ->
            Left $ text "join variable" <+> pprBndr LetBind j <+> text "bound as"
                                        <+> pprBndr LetBind j'
        | isDeadBinder j' ->
@@ -315,7 +319,9 @@ lintCoreJump env args j
       = go ty args
     goTup n (argTy:argTys) (arg:args)
       = do
-        void $ checkingType (speakNth n <+> text "argument of jump") argTy $
+        void $ checkingType (speakNth n <+> text "argument:" <+> ppr arg $$
+                             text "of jump to:" <+> pprBndr LetBind j)
+                            (substTy (termEnv env) argTy) $
           lintCoreTerm (termEnv env) arg
         goTup (n+1) argTys args
     goTup _ _ _
@@ -385,6 +391,19 @@ substTyInId tvs var = var `setIdType` substTy tvs (idType var)
 extendTvInScopeListSubsted :: TvSubst -> [Var] -> TvSubst
 extendTvInScopeListSubsted tvs vars
   = foldr (flip extendTvInScopeSubsted) tvs vars
+
+lintType :: SDoc -> TermEnv -> Type -> LintM OutType
+lintType desc ent ty
+  | null unknown
+  = return ty'
+  | otherwise
+  = Left $ desc <> colon <+> text "type:" <+> ppr ty $$
+           text "Type variable" <> plural unknown <+> text "not found in scope:" <+>
+             pprWithCommas ppr unknown
+  where
+    ty'     = substTy ent ty
+    known   = getInScopeVars (getTvInScope ent)
+    unknown = varEnvElts $ tyVarsOfType ty' `minusVarEnv` known
 
 mkError :: SDoc -> SDoc -> SDoc -> LintM a
 mkError desc ex act = Left (desc $$ text "expected:" <+> ex
