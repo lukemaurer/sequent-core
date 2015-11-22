@@ -104,9 +104,10 @@ type AnfBindPair  = SeqCoreBindPair
 anfProgram :: UniqSupply -> SeqCoreProgram -> SeqCoreProgram
 anfProgram us binds =
     initUs_ us $ do
-      floats <- anfTopBinds $ assertLintProgram "uniquifyProgram" (text "--- Pre-Unique ---" $$ pprTopLevelBinds binds) $ uniquifyProgram binds
+      floats <- anfTopBinds $ uniquifyProgram binds
       let binds' = deFloatTop floats
-      return (assertLintProgram "anfProgram" (text "--- Pre-ANF ---" $$ pprTopLevelBinds binds') binds')
+      return $ assertLintProgram "anfProgram" binds' $
+                 text "--- Pre-ANF ---" $$ pprTopLevelBinds binds
 
 anfTopBinds :: [SeqCoreBind] -> UniqSM Floats
 -- Note [Floating out of top level bindings]
@@ -395,11 +396,7 @@ anfJump args j
        ; return (foldr appendFloats emptyFloats floats, Jump args' j) }
   where
     demands = case idStrictness j of
-                StrictSig (DmdType _ [] _)
-                  -> repeat topDmd
-                StrictSig (DmdType _ demands _)
-                  -> ASSERT(equalLength args demands)
-                     demands
+                StrictSig (DmdType _ demands _) -> demands ++ repeat topDmd
                   
     
     doArg arg dmd = anfArg dmd arg (termType arg)

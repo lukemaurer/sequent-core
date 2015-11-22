@@ -19,8 +19,10 @@
 module Language.SequentCore.FloatOut ( floatOutwards, plugin ) where
 
 import Language.SequentCore.Arity
-import Language.SequentCore.FloatOut.Flags
+import Language.SequentCore.FloatOut.Flags hiding ( FloatGeneralFlag(..) )
+import qualified Language.SequentCore.FloatOut.Flags as FloatFlags
 import Language.SequentCore.FloatOut.SetLevels
+import Language.SequentCore.Lint
 import Language.SequentCore.Plugin
 import Language.SequentCore.Syntax
 import Language.SequentCore.Syntax.Util
@@ -69,16 +71,16 @@ plugin = defaultPlugin {
     let todos' = replace fflags todos
     return todos'
 } where
-  replace fflags = go
+  replace fflags = go True
     where
-      go (CoreDoFloatOutwards switches : todos)
-        = normalPass switches : go todos
-      go (CoreDoPasses todos1 : todos2)
-        = CoreDoPasses (go todos1) : go todos2
-      go (todo : todos)
-        = todo : go todos
-      go []
-        | fgopt Opt_LLF fflags
+      go top (CoreDoFloatOutwards switches : todos)
+        = normalPass switches : go top todos
+      go top (CoreDoPasses todos1 : todos2)
+        = CoreDoPasses (go False todos1) : go top todos2
+      go top (todo : todos)
+        = todo : go top todos
+      go top []
+        | top, fgopt FloatFlags.Opt_LLF fflags
         = [finalPass]
         | otherwise
         = []
@@ -93,24 +95,24 @@ plugin = defaultPlugin {
                                         (Just finalPassSwitches) )
 
       switchesForFinal = FloatOutSwitches
-        { floatOutLambdas             = lateFloatNonRecLam fflags
+        { floatOutLambdas             = FloatFlags.lateFloatNonRecLam fflags
         , floatOutConstants           = False
         , floatOutPartialApplications = False
         }
 
       finalPassSwitches = FinalPassSwitches
-        { fps_trace          = doptDumpLateFloat          fflags
-        , fps_stabilizeFirst = fgopt Opt_LLF_Stabilize    fflags
-        , fps_rec            = lateFloatRecLam            fflags
-        , fps_absUnsatVar    = fgopt Opt_LLF_AbsUnsat     fflags
-        , fps_absSatVar      = fgopt Opt_LLF_AbsSat       fflags
-        , fps_absOversatVar  = fgopt Opt_LLF_AbsOversat   fflags
-        , fps_createPAPs     = fgopt Opt_LLF_CreatePAPs   fflags
-        , fps_ifInClo        = lateFloatIfInClo           fflags
-        , fps_cloGrowth      = lateFloatCloGrowth         fflags
-        , fps_cloGrowthInLam = lateFloatCloGrowthInLam    fflags
-        , fps_strictness     = fgopt Opt_LLF_UseStr       fflags
-        , fps_oneShot        = fgopt Opt_LLF_OneShot      fflags
+        { fps_trace          = doptDumpLateFloat                     fflags
+        , fps_stabilizeFirst = fgopt FloatFlags.Opt_LLF_Stabilize    fflags
+        , fps_rec            = FloatFlags.lateFloatRecLam            fflags
+        , fps_absUnsatVar    = fgopt FloatFlags.Opt_LLF_AbsUnsat     fflags
+        , fps_absSatVar      = fgopt FloatFlags.Opt_LLF_AbsSat       fflags
+        , fps_absOversatVar  = fgopt FloatFlags.Opt_LLF_AbsOversat   fflags
+        , fps_createPAPs     = fgopt FloatFlags.Opt_LLF_CreatePAPs   fflags
+        , fps_ifInClo        = FloatFlags.lateFloatIfInClo           fflags
+        , fps_cloGrowth      = FloatFlags.lateFloatCloGrowth         fflags
+        , fps_cloGrowthInLam = FloatFlags.lateFloatCloGrowthInLam    fflags
+        , fps_strictness     = fgopt FloatFlags.Opt_LLF_UseStr       fflags
+        , fps_oneShot        = fgopt FloatFlags.Opt_LLF_OneShot      fflags
         }
 
 runFloatOut :: FloatOutSwitches -> FloatFlags -> Maybe FinalPassSwitches
@@ -219,6 +221,10 @@ floatOutwards float_sws fps dflags fflags us pgm
         dumpIfSet_dyn dflags Opt_D_verbose_core2core "Levels added:"
                   (vcat (map ppr annotated_w_levels));
 
+        (assertLintProgram "mid-floatOutwards" (map deTag annotated_w_levels) $
+          text "--- Pre-float: ---" $$ vcat (map ppr pgm))
+          `seq` return ();
+
         let { (tlets, ntlets, lams) = get_stats (sum_stats fss) };
 
         dumpIfSet_dyn dflags Opt_D_dump_simpl_stats "FloatOut stats:"
@@ -226,7 +232,8 @@ floatOutwards float_sws fps dflags fflags us pgm
                     int ntlets, ptext (sLit " Lets floated elsewhere; from "),
                     int lams,   ptext (sLit " Lambda groups")]);
 
-        return (bagToList (unionManyBags binds_s'))
+        return $ assertLintProgram "floatOutwards" (bagToList (unionManyBags binds_s')) $
+          text "--- With levels: ---" $$ vcat (map ppr annotated_w_levels)
     }
 
 floatTopBind :: Levelled Bind -> (FloatStats, Bag SeqCoreBind)

@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns, ViewPatterns #-}
-
 module Language.SequentCore.FloatOut.Summary (
   -- * Main entry
   summarizeProgram,
@@ -13,16 +11,11 @@ module Language.SequentCore.FloatOut.Summary (
   SummBndr, SummTerm, SummArg, SummFrame, SummEnd, SummCommand, SummJoin,
   SummBind, SummBindPair, SummAlt, SummKont, SummProgram,
   
-  getSummary, getVarUses, getFreeVarsSumm, fvsFromSumm, lookupVarUses,
-  
-  -- * Using the skeleton
-  costToLift
+  getSummary, getVarUses, getFreeVarsSumm, fvsFromSumm, lookupVarUses
 ) where
   
 import Language.SequentCore.Annot
 import Language.SequentCore.Syntax
-
-import SMRep            ( WordOff )
 
 import qualified CoreFVs
 import CoreSyn  ( Tickish(..) )
@@ -40,7 +33,7 @@ import Control.Applicative ( (<$>) )
 import Control.Exception   ( assert )
 
 data Summary 
-  = Summary { sm_varsUsed :: VarUses    -- All vars used in scope and how
+  = Summary { sm_varsUsed :: VarUses    -- All vars used in scope/expression and how
             , sm_skeleton :: Skeleton } -- Approximation used to calculate
                                         -- impact of lambda-lifting
 
@@ -118,10 +111,10 @@ summBind (NonRec pair) bodySumm
 summBind (Rec pairs) bodySumm
   = (outerSumm, AnnRec pairs')
   where
-    pairs'    = map (summBindPair summ') pairs -- knot
-    rhsSumms  = map getSummary pairs'
-    summ'     = bodySumm `unionSumm` unionSumms rhsSumms
-    outerSumm = bndrs `delBindersSumm` summ'
+    pairs'    = map (summBindPair scopeSumm) pairs -- knot
+    rhsSumm   = unionSumms (map getSummary pairs')
+    scopeSumm = bodySumm `unionSumm` rhsSumm
+    outerSumm = bndrs `delBindersSumm` rhsSumm
     bndrs     = map binderOfPair pairs
 
 summBindPair :: Summary -- Summary of scope
@@ -169,7 +162,7 @@ summTerm (Lam bndr body) _
   where
     body' = summRhsTerm body
     summ  = getSummary body'
-    skel  = lamSk (isId bndr && isOneShotBndr bndr) (sm_skeleton summ)
+    skel  = lamSk (isOneShotBndr bndr) (sm_skeleton summ)
     summ' = bndr `delBinderSumm` summ { sm_skeleton = skel }
 
 summTerm (Compute ty comm) _
@@ -357,44 +350,6 @@ altSk :: Skeleton -> Skeleton -> Skeleton
 altSk NilSk r = r
 altSk l NilSk = l
 altSk l r = AltSk l r
-
--- type OldId = Id
-type NewId = Id
-type OldIdSet = IdSet
-type NewIdSet = IdSet
-costToLift :: (OldIdSet -> NewIdSet) -> (Id -> WordOff) ->
-  NewId -> NewIdSet -> -- the function binder and its free ids
-  Skeleton -> -- abstraction of the scope of the function
-  (WordOff, WordOff) -- ( closure growth , closure growth in lambda )
-costToLift expander sizer f abs_ids = go where
-  go sk = case sk of
-    NilSk -> (0,0)
-    CloSk _ (expander -> fids) rhs -> -- NB In versus Out ids
-      let (!cg1,!cgil1) = go rhs
-          cg | f `elemVarSet` fids =
-               let newbies = abs_ids `minusVarSet` fids
-               in foldVarSet (\id size -> sizer id + size) (0 - sizer f) newbies
-             | otherwise           = 0
-            -- (max 0) the growths from the RHS, since the closure
-            -- might not be entered
-            --
-            -- in contrast, the effect on the closure's allocation
-            -- itself is certain
-      in (cg + max 0 cg1, max 0 cgil1)
-    BothSk sk1 sk2 -> let (!cg1,!cgil1) = go sk1
-                          (!cg2,!cgil2) = go sk2
-                       -- they are under different lambdas (if any),
-                       -- so we max instead of sum, since their
-                       -- multiplicities could differ
-                      in (cg1 + cg2   ,   cgil1 `max` cgil2)
-    LamSk oneshot sk -> case go sk of
-      (cg, cgil) -> if oneshot
-                    then (   max 0 $ cg + cgil   ,   0) -- zero entries or one
-                    else (0   ,   cg `max` cgil   ) -- perhaps several entries
-    AltSk sk1 sk2 -> let (!cg1,!cgil1) = go sk1
-                         (!cg2,!cgil2) = go sk2
-                     in (   cg1 `max` cg2   ,   cgil1 `max` cgil2   )
-
 
 ----------
 instance Outputable BindSummary where

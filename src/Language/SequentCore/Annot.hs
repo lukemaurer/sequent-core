@@ -20,7 +20,7 @@ module Language.SequentCore.Annot (
   deAnnotateBind, deAnnotateAlt,
 
   -- * Operations on Annotated AST
-  binderOfAnnPair, bindersOfAnnBind, bindersOfAnnBinds,
+  binderOfAnnPair, flattenAnnBind, bindersOfAnnBind, bindersOfAnnBinds,
   collectAnnBinders, collectAnnArgs
 ) where
 
@@ -154,9 +154,12 @@ binderOfAnnPair :: AnnBindPair b a -> b
 binderOfAnnPair (_, AnnBindTerm bndr _) = bndr
 binderOfAnnPair (_, AnnBindJoin bndr _) = bndr
 
+flattenAnnBind :: AnnBind b a -> [AnnBindPair b a]
+flattenAnnBind (_, AnnNonRec pair) = [pair]
+flattenAnnBind (_, AnnRec pairs)   = pairs
+
 bindersOfAnnBind :: AnnBind b a -> [b]
-bindersOfAnnBind (_, AnnNonRec pair) = [binderOfAnnPair pair]
-bindersOfAnnBind (_, AnnRec pairs)   = binderOfAnnPair <$> pairs
+bindersOfAnnBind bind = binderOfAnnPair <$> flattenAnnBind bind
 
 bindersOfAnnBinds :: [AnnBind b a] -> [b]
 bindersOfAnnBinds = concatMap bindersOfAnnBind

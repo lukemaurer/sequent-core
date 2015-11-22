@@ -24,6 +24,7 @@ import Literal
 import Outputable
 import Pair
 import Type
+import Util         ( debugIsOn )
 import VarEnv
 
 import Control.Monad
@@ -107,8 +108,8 @@ lintCoreBindings binds = eitherToMaybe $ foldM lintCoreTopBind initEnv binds
     -- All top-level bindings are considered visible (see CoreLint.lintCoreBindings)
     initEnv = extendTermEnvList emptyTermEnv (flattenBinds binds)
 
-assertLintProgram :: String -> SDoc -> [SeqCoreBind] -> [SeqCoreBind]
-assertLintProgram msg extraDoc binds
+assertLintProgram :: String -> [SeqCoreBind] -> SDoc -> [SeqCoreBind]
+assertLintProgram msg binds extraDoc
   | not debugIsOn = binds
   | otherwise
   = case lintCoreBindings binds of
