@@ -40,7 +40,7 @@ import TysPrim
 import TysWiredIn
 import UniqFM     ( intersectUFM_C )
 import Unique
-import Util       ( count )
+import Util       ( count, lengthExceeds )
 import VarEnv
 import VarSet
 
@@ -787,23 +787,31 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
       Core.Let bs e      ->
         let (env', bs')   = fromCoreBind env (Just (fs, end)) bs
         in go (bs' : binds) env' e fs end
-      Core.Case e (Marked x _) _ as
-        -- If the continuation is just a return, copy it into the branches
-        | null fs, Return {} <- end -> go binds env e [] end'
+      Core.Case e (Marked x _) retTy as
+        -- Copy into the branches if safe.
+        | copy_kont -> go binds env e [] copying_end
         -- Otherwise be more careful. In the simplifier, we get clever and
         -- split the continuation into a duplicable part and a non-duplicable
-        -- part (see splitDupableKont); for now just share the whole thing.
-        | otherwise -> 
-        let join_arg  = mkKontArgId (idType x')
-            join_rhs  = Join [join_arg] (Eval (Var join_arg) [] end')
-            join_ty   = mkKontTy (mkTupleTy UnboxedTuple [idType x'])
-            join_bndr = mkInlinableJoinBinder join_ty
-            join_bind = NonRec (BindJoin join_bndr join_rhs)
-        in go (join_bind : binds) env e [] (Case join_arg [Alt DEFAULT [] (Jump [Var join_arg] join_bndr)])
+        -- part (see mkDupableKont); for now just share the whole thing.
+        | otherwise -> go (join_bind : binds) env_with_join e [] joining_end
         where
-          (subst_rhs, x') = substBndr subst x
-          env_rhs = env { fce_subst = subst_rhs }
-          end'    = Case x' $ map (fromCoreAlt env_rhs (fs, end)) as
+          copy_kont | null fs, Return <- end     = True  -- copy Return
+                    | not (as `lengthExceeds` 1) = True  -- "copy" into < 2 branches
+                    | otherwise                  = False -- would duplicate code
+
+          (subst_alts, x') = substBndr subst x
+          env_alts         = env { fce_subst = subst_alts }
+
+          copying_end = Case x' $ map (fromCoreAlt env_alts (fs, end)) as
+
+          join_arg  = mkKontArgId retTy
+          join_rhs  = Join [join_arg] (Eval (Var join_arg) fs end)
+          join_ty   = mkKontTy (mkTupleTy UnboxedTuple [retTy])
+          join_bndr = uniqAway (substInScope subst) (mkTranslatedJoinBinder join_ty)
+          join_bind = NonRec (BindJoin join_bndr join_rhs)
+          env_with_join = env { fce_subst = extendInScope subst join_bndr }
+          join_kont     = ([], Case join_arg [Alt DEFAULT [] (Jump [Var join_arg] join_bndr)])
+          joining_end   = Case x' $ map (fromCoreAlt env_alts join_kont) as
       Core.Coercion co   -> done $ Coercion (substCo subst co)
       Core.Cast e co     -> go binds env e (Cast (substCo subst co) : fs) end
       Core.Tick ti e     -> go binds env e (Tick (substTickish subst ti) : fs) end
