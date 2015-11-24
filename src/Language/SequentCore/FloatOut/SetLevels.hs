@@ -687,7 +687,8 @@ lvlMFEComm strict_ctxt env ty ann_comm
     abs_vars = abstractVars dest_lvl env summ
     
         -- Eliminate a few kinds of commands from consideration
-    never_float (_, AnnEval _ _ (_, AnnCase {})) = True -- Don't share cases
+    never_float (_, AnnEval _ _ (_, AnnCase {})) | strict_ctxt
+                                                 = True -- Don't share cases from strict contexts
     never_float (_, AnnJump {})                  = True -- Note [Don't float jumps]
     never_float _                                = False
     
@@ -723,7 +724,6 @@ trimForFloating :: LevelEnv
 -- If we do we'll transform  lvl = e |> co 
 --                       to  lvl' = e; lvl = lvl' |> co
 -- and then inline lvl.  Better just to float out the payload.
-trimForFloating _ comm@(_, AnnLet {}) = (comm, [])
 trimForFloating env (fvs, AnnEval term frames end@(_, AnnReturn))
   = ((fvs, AnnEval term frames' end), extraFrames)
   where
@@ -731,7 +731,7 @@ trimForFloating env (fvs, AnnEval term frames end@(_, AnnReturn))
     go ((_, AnnTick ti) : fs) acc = go fs (Tick ti : acc)
     go ((_, AnnCast co) : fs) acc = go fs (Cast (substCo (le_subst env) co) : acc)
     go fs                     acc = (reverse fs, acc)
-trimForFloating _ comm = pprPanic "trimForFloating" (ppr (deAnnotateCommand comm))
+trimForFloating _ comm = (comm, [])
 -- XXX The trimForFloating function is a bit awkward; it's meant to replace the
 -- AnnTick and AnnCast cases of lvlMFE in GHC. A refactor might clarify things.
 
