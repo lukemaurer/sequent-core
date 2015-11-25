@@ -716,8 +716,12 @@ lvlMFEComm strict_ctxt env ty ann_comm
     never_float (_, AnnEval _ _ (_, AnnCase {})) | strict_ctxt
                                                  = True -- Don't share cases from strict contexts
     never_float (_, AnnJump {})                  = True -- Note [Don't float jumps]
+    never_float (summ, _)                        | has_join summ
+                                                 = True -- Contains a jump
     never_float _                                = False
     
+    has_join summ = any isJoinId (varSetElems (fvsFromSumm summ))
+
         -- A decision to float entails let-binding this thing, and we only do 
         -- that if we'll escape a value lambda, or will go to the top level.
     float_me = dest_lvl `ltMajLvl` (le_ctxt_lvl env)    -- Escapes a value lambda
@@ -789,8 +793,8 @@ Note [Don't float jumps]
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to float a jump, we'd need to abstract it as a join point. But then we
-never float join points because it never helps. (FIXME Except sometimes; see
-above.) So we don't float jumps.
+never float join points unless they can go to top level, and a jump can never go
+to top level because of course it refers to the join point.
 
 In STG terms, this suggests that it never helps to float an invocation of a
 let-no-escape function. TODO Is this true?
