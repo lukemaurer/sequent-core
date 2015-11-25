@@ -703,7 +703,14 @@ lvlMFEComm strict_ctxt env ty ann_comm
     is_bot   = commandIsBottom comm      -- Note [Bottoming floats]
     dest_lvl = destLevel env summ is_bot
     summ     = getSummary ann_comm
-    abs_vars = abstractVars dest_lvl env summ
+    fvs      = fvsFromSumm summ `unionVarSet` tyVarsOfType ty
+                 -- ty may not be the final type of the binding if we trim off
+                 -- coercions (see ty' above). But if there are coercions to
+                 -- trim off, the command must specify its own return type, so
+                 -- the free vars of ty and ty' are in summ to begin with. In
+                 -- short, we can get away with using ty to calculate the tyvars
+                 -- to abstract.
+    abs_vars = abstractVars dest_lvl env fvs
     
         -- Eliminate a few kinds of commands from consideration
     never_float (_, AnnEval _ _ (_, AnnCase {})) | strict_ctxt
@@ -1047,14 +1054,14 @@ decideBindFloat env bind
                   || isTopLvl dest_lvl -- Going all the way to the top level
 
         dest_lvl = destLevel env bind_summ is_bot
-        abs_vars = abstractVars dest_lvl env bind_summ
+        abs_vars = abstractVars dest_lvl env fvs
 
     late_float fps | all_funs -- only lift functions
                    , Nothing <- why_not = Just (tOP_LEVEL, abs_vars)
                    | otherwise          = Nothing
       where
-        abs_vars    = abstractVars tOP_LEVEL env bind_summ
-        abs_ids_set = expandFloatedIds env (fvsFromSumm bind_summ)
+        abs_vars    = abstractVars tOP_LEVEL env fvs
+        abs_ids_set = expandFloatedIds env fvs
         abs_ids     = varSetElems abs_ids_set
 
         why_not = decideLateLambdaFloat env fps is_rec all_one_shot abs_ids_set
@@ -1079,6 +1086,7 @@ decideBindFloat env bind
                   $$ text "abs_vars:"   <+> ppr abs_vars
 
     bind_summ = getSummary bind
+    fvs = fvsFromSumm bind_summ
     is_bot | (_, AnnNonRec (_, AnnBindTerm _ term)) <- bind = termIsBottom (deAnnotateTerm term)
            | (_, AnnNonRec (_, AnnBindJoin _ (_, AnnJoin _ comm))) <- bind
                                                             = commandIsBottom (deAnnotateCommand comm)
@@ -1536,11 +1544,11 @@ lookupVar le v = case lookupVarEnv (le_env le) v of
 decontifying :: LevelEnv -> JoinId -> Bool
 decontifying le j = j `elemVarSet` le_decont le
 
-abstractVars :: Level -> LevelEnv -> Summary -> [OutVar]
+abstractVars :: Level -> LevelEnv -> VarSet -> [OutVar]
         -- Find the variables in fvs, free vars of the target expresion,
         -- whose level is greater than the destination level
         -- These are the ones we are going to abstract out
-abstractVars dest_lvl (LE { le_subst = subst, le_lvl_env = lvl_env }) (fvsFromSumm -> in_fvs)
+abstractVars dest_lvl (LE { le_subst = subst, le_lvl_env = lvl_env }) in_fvs
   = map zap $ uniq $ sortQuantVars
     [out_var | out_fv  <- varSetElems (substVarSet subst in_fvs)
              , out_var <- varSetElems (close out_fv)

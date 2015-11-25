@@ -471,8 +471,12 @@ floatComm (Eval term frames end)
             return (term', acc)
         go (App arg : fs_rev) acc
           = do
-            arg' <- floatTerm arg
-            go fs_rev (App arg' : acc)
+            -- Match GHC's float order
+            (floats1, arg') <- captureFloats $ floatTerm arg
+            (floats2, ans) <- captureFloats $ go fs_rev (App arg' : acc)
+            emitFloats floats2
+            emitFloats floats1
+            return ans
         go (Cast co : fs_rev) acc
           = go fs_rev (Cast co : acc)
         go (Tick ti : fs_rev) acc
