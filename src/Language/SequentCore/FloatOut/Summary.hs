@@ -102,21 +102,6 @@ summTopBind bind
     doPair pair@(BindJoin {})
       = pprPanic "summTopBind" (text "Top-level join" $$ ppr pair)
 
-summBind :: SeqCoreBind -> Summary -> SummBind
-summBind (NonRec pair) bodySumm
-  = (summ, AnnNonRec pair') 
-  where
-    pair' = summBindPair bodySumm pair
-    summ  = getSummary pair'
-summBind (Rec pairs) bodySumm
-  = (outerSumm, AnnRec pairs')
-  where
-    pairs'    = map (summBindPair scopeSumm) pairs -- knot
-    rhsSumm   = unionSumms (map getSummary pairs')
-    scopeSumm = bodySumm `unionSumm` rhsSumm
-    outerSumm = bndrs `delBindersSumm` rhsSumm
-    bndrs     = map binderOfPair pairs
-
 summBindPair :: Summary -- Summary of scope
              -> SeqCoreBindPair -> SummBindPair
 -- Note that, if this port of a recursive binding, the summary covers the RHS,
@@ -171,14 +156,26 @@ summTerm (Compute ty comm) _
     comm' = summCommand comm
 
 summCommand :: SeqCoreCommand -> SummCommand
-summCommand (Let bind body)
-  = (summ', AnnLet bind' body')
+summCommand (Let (NonRec pair) body)
+  = (summ, AnnLet (bindSumm, AnnNonRec pair') body')
   where
-    body'    = summCommand body
-    bind'    = summBind bind bodySumm
-    bodySumm = getSummary body'
-    bindSumm = getSummary bind'
-    summ'    = bindSumm `unionSumm` bodySumm
+    body'     = summCommand body
+    bodySumm  = getSummary body'
+    scopeSumm = bodySumm -- binder scopes over the body only
+    pair'     = summBindPair scopeSumm pair
+    bindSumm  = getSummary pair'
+    bndr      = binderOfPair pair
+    summ      = bindSumm `unionSumm` (bndr `delBinderSumm` scopeSumm)
+summCommand (Let (Rec pairs) body)
+  = (summ, AnnLet (bindSumm, AnnRec pairs') body')
+  where
+    body'     = summCommand body
+    bodySumm  = getSummary body'
+    scopeSumm = bodySumm `unionSumm` bindSumm -- binder scopes over bind and body
+    pairs'    = map (summBindPair scopeSumm) pairs
+    bindSumm  = unionSumms (map getSummary pairs') -- knotted with scopeSumm
+    bndrs     = map binderOfPair pairs
+    summ      = bndrs `delBindersSumm` scopeSumm
 summCommand (Eval term frames end)
   = (summ', AnnEval term' frames' end')
   where
