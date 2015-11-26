@@ -1,5 +1,5 @@
 {-# LANGUAGE ParallelListComp, TupleSections, MultiWayIf, ViewPatterns,
-             LambdaCase, BangPatterns, CPP #-}
+             LambdaCase, CPP #-}
 
 -- | 
 -- Module      : Language.SequentCore.Translate
@@ -788,14 +788,16 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
         let (env', bs')   = fromCoreBind env (Just (fs, end)) bs
         in go (bs' : binds) env' e fs end
       Core.Case e (Marked x _) retTy as
-        -- Copy into the branches if safe.
+        -- Copy the continuation into the branches if safe.
         | copy_kont -> go binds env e [] copying_end
         -- Otherwise be more careful. In the simplifier, we get clever and
         -- split the continuation into a duplicable part and a non-duplicable
-        -- part (see mkDupableKont); for now just share the whole thing.
-        | otherwise -> go (join_bind : binds) env_with_join e [] joining_end
+        -- part (see mkDupableKont); for now just share the whole thing by
+        -- translating e with the empty continuation and wrapping around it.
+        -- Note [Case translation]
+        | otherwise -> done inner_term
         where
-          copy_kont | null fs, Return <- end     = True  -- copy Return
+          copy_kont | isTrivialKont (fs, end)    = True  -- copy trivial
                     | not (as `lengthExceeds` 1) = True  -- "copy" into < 2 branches
                     | otherwise                  = False -- would duplicate code
 
@@ -804,14 +806,9 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
 
           copying_end = Case x' $ map (fromCoreAlt env_alts (fs, end)) as
 
-          join_arg  = mkKontArgId retTy
-          join_rhs  = Join [join_arg] (Eval (Var join_arg) fs end)
-          join_ty   = mkKontTy (mkTupleTy UnboxedTuple [retTy])
-          join_bndr = uniqAway (substInScope subst) (mkTranslatedJoinBinder join_ty)
-          join_bind = NonRec (BindJoin join_bndr join_rhs)
-          env_with_join = env { fce_subst = extendInScope subst join_bndr }
-          join_kont     = ([], Case join_arg [Alt DEFAULT [] (Jump [Var join_arg] join_bndr)])
-          joining_end   = Case x' $ map (fromCoreAlt env_alts join_kont) as
+          inner_term = Compute (substTy subst retTy) $
+                         fromCoreExpr env e ([], joined_end)
+          joined_end = Case x' $ map (fromCoreAlt env_alts ([], Return)) as
       Core.Coercion co   -> done $ Coercion (substCo subst co)
       Core.Cast e co     -> go binds env e (Cast (substCo subst co) : fs) end
       Core.Tick ti e     -> go binds env e (Tick (substTickish subst ti) : fs) end
@@ -834,6 +831,30 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
             
             doneEval v fs e = addLets (reverse binds) $ Eval v fs e
             doneJump vs j = foldr Let (Jump vs j) (reverse binds)
+
+{-
+Note [Case translation]
+~~~~~~~~~~~~~~~~~~~~~~~
+
+It's very easy (at least for me---LVWM) to overthink case translation and worry
+that we have to do some sort of case-of-case logic here. Writing [| e |] : k for
+the command that translates e with continuation k, we have:
+
+  [| case e of alts |] : k
+    = < compute ([| e |] : case of ([| alts |] : ret)) | k >
+
+This is a redex---we could substitute k for ret. If k is itself a case, then
+doing so is the equivalent of a naive case-of-case transform, since k is copied
+into the branches. We keep the redex because the simplifier is better equipped
+to handle the subtleties of avoiding excessive duplication.
+
+The concerned reader may object to the above construction because of the scoping
+rule for a compute binder: The body must have no free join variables. If alts
+has an alternative that invokes a join point, we're in trouble. But this is only
+possible if k is trivial. In a case-of-case (or case-of-apply) situation, the
+expression (case e of alts) is not in tail position, and thus any free variables
+in e or alts cannot be a join point.
+-}
 
 fromCoreLams :: FromCoreEnv -> MarkedVar -> Core.Expr MarkedVar
                             -> SeqCoreTerm
