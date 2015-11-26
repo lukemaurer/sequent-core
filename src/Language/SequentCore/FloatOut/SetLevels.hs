@@ -88,6 +88,7 @@ import StgCmmClosure    ( idPrimRep, addIdReps )
 
 import Id
 import IdInfo
+import MkId             ( voidArgId, voidPrimId )
 import Var
 import VarSet
 import VarEnv
@@ -470,7 +471,7 @@ lvlComm env ty (_, AnnEval term frames end)
                           AnnCompute ty_pap $
                             (fvs_pap, AnnEval term lapps (emptySumm, AnnReturn)))
         pap'         <- lvlMFE False env pap
-        otherFrames' <- mapM (lvlMFEFrame env) otherFrames
+        otherFrames' <- mapM (lvlFrame env) otherFrames
         return (pap', otherFrames')
         where
           (lapps, otherFrames) = takeApps arity frames
@@ -499,11 +500,12 @@ lvlComm env ty (_, AnnEval term frames end)
 lvlComm env _ (_, AnnJump args j)
   | decontifying env j
   = do
-    args' <- mapM (lvlTerm env) args
+    args' <- if null args then return [Var voidPrimId]
+                          else mapM (lvlMFE False env) args
     return $ Eval (lookupVar env j) (map App args') Return
   | otherwise
   = do
-    args' <- mapM (lvlTerm env) args
+    args' <- mapM (lvlMFE False env) args
     case lookupVar env j of
       Var j' -> return $ Jump args' j' 
       other  -> pprPanic "lvlComm" (text "Abstracted join??" <+> ppr other) 
@@ -512,6 +514,8 @@ lvlFrame :: LevelEnv
          -> SummFrame
          -> LvlM (Levelled Frame)
 lvlFrame env (_, AnnApp arg) = App <$> lvlMFE False env arg
+                                 -- TODO Use strictness of argument?
+                                 -- Is there a reason that GHC doesn't?
 lvlFrame env (_, AnnCast co) = return $ Cast (substCo (le_subst env) co)
 lvlFrame _   (_, AnnTick ti) = return $ Tick ti
 
@@ -529,10 +533,26 @@ lvlRhs env _retTy new_bndr (_, AnnBindTerm _bndr term)
   = do { new_term <- lvlTerm env term
        ; return (BindTerm new_bndr new_term) }
 lvlRhs env retTy new_bndr (_, AnnBindJoin _bndr join)
-  -- Here we DO NOT assume that new_bndr and _bndr are join ids! If we're
-  -- decontifying, we do the binder before the RHS (awkwardly enough)
   = do { new_join <- lvlJoin env retTy join
        ; return (BindJoin new_bndr new_join) }
+
+decontifyBindPair :: LevelEnv -> Type -> SummBindPair -> (LevelEnv, SummBindPair)
+decontifyBindPair env _ pair@(_, AnnBindTerm {}) = (env, pair)
+decontifyBindPair env retTy (summ, AnnBindJoin bndr join)
+  = (env', (summ, AnnBindTerm bndr' term))
+    where
+      (env', bndr') = decontifyBndr env retTy bndr
+      term = case join of
+               (joinSumm, AnnJoin bndrs comm) ->
+                 foldr lam (joinSumm, AnnCompute retTy comm) bndrs'
+                 where
+                   bndrs' | null bndrs = [TB voidArgId NoSummary]
+                          | otherwise  = bndrs
+
+                   lam x body = (joinSumm, AnnLam x body)
+
+decontifyBindPairs :: LevelEnv -> Type -> [SummBindPair] -> (LevelEnv, [SummBindPair])
+decontifyBindPairs env ty = mapAccumL (flip decontifyBindPair ty) env
 
 -------------------------------------------
 lvlCase :: LevelEnv             -- Level of in-scope names/tyvars
@@ -658,15 +678,6 @@ lvlMFE strict_ctxt env term@(_, AnnLam {})
 
 lvlMFE strict_ctxt env (_, AnnCompute ty comm)
   = mkCompute ty <$> lvlMFEComm strict_ctxt env ty comm
-
-lvlMFEFrame :: LevelEnv
-            -> SummFrame
-            -> LvlM (Levelled Frame)
-lvlMFEFrame env (_, AnnApp arg) = App <$> lvlMFE False env arg
-                                    -- TODO Use strictness of argument?
-                                    -- Is there a reason that GHC doesn't?
-lvlMFEFrame env (_, AnnCast co) = return $ Cast (substCo (le_subst env) co)
-lvlMFEFrame _   (_, AnnTick ti) = return $ Tick ti
 
 lvlMFEComm :: Bool                    -- True <=> strict context [body of case or let]
            -> LevelEnv                -- Level of in-scope names/tyvars
@@ -973,11 +984,11 @@ lvlBind env ty bind@(_, AnnNonRec pair)
   , not (isCoVar var)    -- Difficult to fix up CoVar occurrences (see extendPolyLvlEnv)
                          -- so we will ignore this case for now
   , Just (dest_lvl, abs_vars) <- decideBindFloat env bind
-  , not (isTopLvl dest_lvl && isUnLiftedType (idType var))
+  , not (isTopLvl dest_lvl && is_term && isUnLiftedType (idType var))
           -- We can't float an unlifted binding to top level, so we don't 
           -- float it at all.  It's a bit brutal, but unlifted bindings 
           -- aren't expensive either
-  , isTopLvl dest_lvl || bindsTerm (deAnnotateBindPair pair)
+  , isTopLvl dest_lvl || is_term
           -- Never float a join point except to top level
           -- Note [Floating joins]
   = do_float dest_lvl abs_vars
@@ -985,6 +996,7 @@ lvlBind env ty bind@(_, AnnNonRec pair)
   = no_float
   where
     bndr = binderOfAnnPair pair
+    is_term = bindsTerm (deAnnotateBindPair pair)
     TB var _ = bndr
     no_float
       = do { let bind_lvl              = incMinorLvl (le_ctxt_lvl env)
@@ -995,19 +1007,21 @@ lvlBind env ty bind@(_, AnnNonRec pair)
     do_float dest_lvl abs_vars
       | null abs_vars
       = do {  -- No type abstraction; clone existing binder
-             let (env1, bndr1) = decontifyBndr env ty bndr
+             let (env1, pair1) = decontifyBindPair env ty pair
+                 bndr1 = binderOfAnnPair pair1
            ; (new_env, [cloned_bndr]) <- cloneVars NonRecursive env1 dest_lvl [bndr1]
            ; let new_bndr = TB cloned_bndr (FloatMe dest_lvl)
-           ; new_pair <- lvlRhs (setCtxtLvl new_env dest_lvl) ty new_bndr pair
-           ; return (NonRec (decontifyRhs ty NonRecursive new_pair), new_env) }
+           ; new_pair <- lvlRhs (setCtxtLvl new_env dest_lvl) ty new_bndr pair1
+           ; return (NonRec new_pair, new_env) }
 
       | otherwise
       = do {  -- Yes, type abstraction; create a new binder, extend substitution, etc
-             let (env1, bndr1) = decontifyBndr env ty bndr
+             let (env1, pair1) = decontifyBindPair env ty pair
+                 bndr1 = binderOfAnnPair pair1
            ; (new_env, [fresh_bndr]) <- newPolyBndrs dest_lvl env1 abs_vars [bndr1]
            ; let new_bndr = TB fresh_bndr (FloatMe dest_lvl)
-           ; new_pair <- lvlFloatRhs abs_vars dest_lvl env ty new_bndr pair
-           ; return (NonRec (decontifyRhs ty NonRecursive new_pair), new_env) }
+           ; new_pair <- lvlFloatRhs abs_vars dest_lvl env ty new_bndr pair1
+           ; return (NonRec new_pair, new_env) }
 
 lvlBind env ty bind@(_, AnnRec pairs)
   | Just (dest_lvl, abs_vars) <- decideBindFloat env bind
@@ -1028,18 +1042,20 @@ lvlBind env ty bind@(_, AnnRec pairs)
 
     do_float dest_lvl abs_vars
       | null abs_vars
-      = do { let (env1, bndrs1) = decontifyBndrs env ty bndrs
+      = do { let (env1, pairs1) = decontifyBindPairs env ty pairs
+                 bndrs1 = map binderOfAnnPair pairs1
            ; (new_env, cloned_bndrs) <- cloneVars Recursive env1 dest_lvl bndrs1
            ; let new_bndrs = [TB b (FloatMe dest_lvl) | b <- cloned_bndrs]
-           ; new_pairs <- zipWithM (lvlRhs (setCtxtLvl new_env dest_lvl) ty) new_bndrs pairs
-           ; return (Rec (map (decontifyRhs ty Recursive) new_pairs), new_env) }
+           ; new_pairs <- zipWithM (lvlRhs (setCtxtLvl new_env dest_lvl) ty) new_bndrs pairs1
+           ; return (Rec new_pairs, new_env) }
 
       | otherwise  -- Non-null abs_vars
-      = do { let (env1, bndrs1) = decontifyBndrs env ty bndrs
+      = do { let (env1, pairs1) = decontifyBindPairs env ty pairs
+                 bndrs1 = map binderOfAnnPair pairs1
            ; (new_env, fresh_bndrs) <- newPolyBndrs dest_lvl env1 abs_vars bndrs1
            ; let new_bndrs = [TB b (FloatMe dest_lvl) | b <- fresh_bndrs]
-           ; new_pairs <- zipWithM (lvlFloatRhs abs_vars dest_lvl new_env ty) new_bndrs pairs
-           ; return (Rec (map (decontifyRhs ty Recursive) new_pairs), new_env) }
+           ; new_pairs <- zipWithM (lvlFloatRhs abs_vars dest_lvl new_env ty) new_bndrs pairs1
+           ; return (Rec new_pairs, new_env) }
 
 decideBindFloat :: LevelEnv -> SummBind
                 -> Maybe (Level, [Var]) -- Nothing <=> do not float
@@ -1664,23 +1680,6 @@ decontifyBndr le retTy (TB bndr summ)
   where
     le'   = le { le_decont = extendVarSet (le_decont le) bndr' }
     bndr' = joinIdToCore retTy bndr
-
-decontifyBndrs :: LevelEnv -> Type -> [SummBndr] -> (LevelEnv, [SummBndr])
-decontifyBndrs le retTy = mapAccumL (flip decontifyBndr retTy) le
-
-decontifyRhs :: Type -> RecFlag -> Levelled BindPair -> Levelled BindPair
-  -- Assumes the binder is already decontified (even if it's a BindJoin!)
-decontifyRhs _ _ pair@(BindTerm {}) = pair
-decontifyRhs retTy recFlag (BindJoin bndr (Join bndrs comm))
-  = BindTerm bndr (mkLambdas bndrs' (Compute retTy comm))
-  where
-    bndrs' | isRec recFlag = bndrs
-           | otherwise     = map setOS bndrs
-    setOS (TB bndr lvl)
-      = TB bndr' lvl
-      where
-        bndr' | isId bndr = setOneShotLambda bndr
-              | otherwise = bndr
 
 add_id :: IdEnv (OutVar, [OutVar]) -> (Var, Var) -> IdEnv (OutVar, [OutVar])
 add_id id_env (v, v1)
