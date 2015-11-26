@@ -726,12 +726,15 @@ lvlMFEComm strict_ctxt env ty ann_comm
         -- Eliminate a few kinds of commands from consideration
     never_float (_, AnnEval _ _ (_, AnnCase {})) | strict_ctxt
                                                  = True -- Don't share cases from strict contexts
-    never_float (_, AnnJump {})                  = True -- Note [Don't float jumps]
+    never_float (_, AnnJump _ j)                 | is_still_join j
+                                                 = True -- Note [Don't float jumps]
     never_float (summ, _)                        | has_join summ
                                                  = True -- Contains a jump
     never_float _                                = False
     
-    has_join summ = any isJoinId (varSetElems (fvsFromSumm summ))
+    has_join summ = any is_still_join (varSetElems (fvsFromSumm summ))
+    is_still_join j = isJoinId j && not (j `elemVarSet` le_decont env)
+                         -- It's a join point and we're not decontifying it
 
         -- A decision to float entails let-binding this thing, and we only do 
         -- that if we'll escape a value lambda, or will go to the top level.
