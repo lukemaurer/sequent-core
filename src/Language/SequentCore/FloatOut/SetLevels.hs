@@ -983,7 +983,7 @@ lvlBind env ty bind@(_, AnnNonRec pair)
                          --   (simplifier gets rid of them pronto)
   , not (isCoVar var)    -- Difficult to fix up CoVar occurrences (see extendPolyLvlEnv)
                          -- so we will ignore this case for now
-  , Just (dest_lvl, abs_vars) <- decideBindFloat env bind
+  , Just (dest_lvl, abs_vars) <- decideBindFloat env ty bind
   , not (isTopLvl dest_lvl && is_term && isUnLiftedType (idType var))
           -- We can't float an unlifted binding to top level, so we don't 
           -- float it at all.  It's a bit brutal, but unlifted bindings 
@@ -1024,7 +1024,7 @@ lvlBind env ty bind@(_, AnnNonRec pair)
            ; return (NonRec new_pair, new_env) }
 
 lvlBind env ty bind@(_, AnnRec pairs)
-  | Just (dest_lvl, abs_vars) <- decideBindFloat env bind
+  | Just (dest_lvl, abs_vars) <- decideBindFloat env ty bind
   , isTopLvl dest_lvl || not (any (bindsJoin . deAnnotateBindPair) pairs)
           -- Never float a join point except to top level
           -- Note [Floating joins]
@@ -1057,11 +1057,11 @@ lvlBind env ty bind@(_, AnnRec pairs)
            ; new_pairs <- zipWithM (lvlFloatRhs abs_vars dest_lvl new_env ty) new_bndrs pairs1
            ; return (Rec new_pairs, new_env) }
 
-decideBindFloat :: LevelEnv -> SummBind
+decideBindFloat :: LevelEnv -> Type -> SummBind
                 -> Maybe (Level, [Var]) -- Nothing <=> do not float
                                         -- Just (lvl, vars) <=>
                                         --   float to lvl, abstracting vars
-decideBindFloat env bind
+decideBindFloat env retTy bind
   | Just fps <- le_finalPass env
   = late_float fps
   | otherwise
@@ -1106,7 +1106,12 @@ decideBindFloat env bind
                   $$ text "abs_vars:"   <+> ppr abs_vars
 
     bind_summ = getSummary bind
-    fvs = fvsFromSumm bind_summ
+    fvs_summ = fvsFromSumm bind_summ
+    fvs | any (bindsJoin . deAnnotateBindPair) (flattenAnnBind bind)
+        = fvs_summ `unionVarSet` tyVarsOfType retTy
+            -- Will need to abstract over free vars in return type
+        | otherwise
+        = fvs_summ
     is_bot | (_, AnnNonRec (_, AnnBindTerm _ term)) <- bind = termIsBottom (deAnnotateTerm term)
            | (_, AnnNonRec (_, AnnBindJoin _ (_, AnnJoin _ comm))) <- bind
                                                             = commandIsBottom (deAnnotateCommand comm)
