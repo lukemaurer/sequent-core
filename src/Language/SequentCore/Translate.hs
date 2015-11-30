@@ -18,6 +18,7 @@ module Language.SequentCore.Translate (
   onCoreExpr, onSequentCoreTerm
 ) where
 
+import Language.SequentCore.Lint
 import Language.SequentCore.Syntax
 import Language.SequentCore.WiredIn
 
@@ -66,7 +67,7 @@ import Data.Monoid
 
 -- | Translates a list of Core bindings into Sequent Core.
 fromCoreModule :: [Core.CoreBind] -> [SeqCoreBind]
-fromCoreModule = fromCoreBinds . escAnalProgram
+fromCoreModule = fromCoreTopLevelBinds . escAnalProgram
 
 -- | Translates a single Core expression as a Sequent Core term.
 termFromCoreExpr :: Core.CoreExpr -> SeqCoreTerm
@@ -490,15 +491,16 @@ escAnalBind lvl (Core.NonRec bndr rhs) escs_body
     (escs_rhs, (rhs', lamCount)) <-
       captureAnalysis $ escAnalId bndr >> escAnalRhs rhs
       -- escAnalId looks at rules and unfoldings, which act as alternate RHSes
-    let (marked, kontifying, unsat)
+    let (marked, rhs_escapes)
           | isNotTopLevel lvl
           , Just (NonEsc ci) <- occurrences escs_body bndr
           = let (marked, kontifying) = markVar bndr ci
-            in (marked, kontifying, ci_arity ci < lamCount)
+            in (marked, not kontifying || ci_arity ci /= lamCount)
+              -- Note [Contifying inexactly-applied functions]
           | otherwise
-          = (Marked bndr MakeFunc, False, False)
-        escs_rhs' | not kontifying || unsat = markAllAsEscaping escs_rhs
-                  | otherwise               = escs_rhs
+          = (Marked bndr MakeFunc, True)
+        escs_rhs' | rhs_escapes = markAllAsEscaping escs_rhs
+                  | otherwise   = escs_rhs
     writeAnalysis escs_rhs'
     
     env <- getCandidates
@@ -513,7 +515,7 @@ escAnalBind lvl (Core.Rec pairs) escs_body
       <- withEnv env_rhs $ forM pairs $ \(bndr, rhs) ->
            captureAnalysis $ escAnalId bndr >> escAnalRhs rhs
     let escs = mconcat escs_rhss <> escs_body
-        (pairs', kontifying, unsats)
+        (pairs', kontifying, escape_flags)
           | isNotTopLevel lvl
           , Just occsList <- allOccurrences escs bndrs
           = let (bndrs_live, cis, rhss'_live, lamCounts_live)
@@ -521,24 +523,57 @@ escAnalBind lvl (Core.Rec pairs) escs_body
                            | ((bndr, Just ci), rhs', lamCount) <-
                                zip3 occsList rhss' lamCounts ]
                 (bndrs_marked, kontifying) = markVars bndrs_live cis
-                isUnsat ci lamCount = ci_arity ci < lamCount
+                escapes ci lamCount = ci_arity ci /= lamCount
             in ( zip bndrs_marked rhss'_live, kontifying
-               , zipWith isUnsat cis lamCounts_live )
+               , zipWith escapes cis lamCounts_live )
           | otherwise
-          = ([ (Marked bndr MakeFunc, rhs') | (bndr, rhs') <- zip bndrs rhss' ], False, repeat False)
+          = ([ (Marked bndr MakeFunc, rhs') | (bndr, rhs') <- zip bndrs rhss' ], False, repeat True)
         
         escs_rhss' | not kontifying = map markAllAsEscaping escs_rhss
-                   | otherwise      = [ if unsat then markAllAsEscaping escs else escs
+                   | otherwise      = [ if rhs_escapes then markAllAsEscaping escs else escs
                                       | escs <- escs_rhss
-                                      | unsat <- unsats ]
+                                      | rhs_escapes <- escape_flags ]
 
     writeAnalysis (mconcat escs_rhss' `forgetVars` bndrs)
     let env_body = addCandidates env bndrs Outside
     return (env_body, Core.Rec pairs')
 
+{-
+Note [Contifying inexactly-applied functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If a function is consistently tail-called, but with the "wrong" number of
+arguments, then it can still be contified but its body is an escaping context.
+Consider (assuming all calls are tail calls):
+
+    let k = \x -> ...
+        h = \y z ->
+              let j = \w -> ... k (w + z) ... in ... j y ...
+    in ... e ...
+
+Consider three cases for e:
+  * e = h a b: Here we will contify all three functions: h is consistently
+    tail-called *with two arguments*, so its body is a tail context for k;
+    similarly, j is consistently tail-called with one argument, so the call to
+    k is a true tail call.
+  * e = h a: Since h a is a lambda, its body is an escaping context. Thus h is
+    contified (as a continuation of one argument), as is j, but k is not.
+  * e = h a b c: To contify h, we will first need to eta-expand it:
+
+        h = \y z eta ->
+              (let j = \w -> ... k (w + z) ... in ... j y ...) eta
+
+    (We don't bother moving the argument inward; phase 2 will do that.) Now
+    k (w + z) is clearly not a tail call, so again h and j are contified but k
+    is not.
+
+Crucially, escape analysis is a bottom-up pass, so we can in fact decide on j
+and h first, thus influencing the decision for k.
+-}
+
 -- | Analyse an expression, but don't let its top-level lambdas cause calls to
 -- escape. Returns the number of lambdas ignored; if the function is partially
--- invoked, the calls escape after all.
+-- applied or oversaturated, the calls escape after all.
 escAnalRhs :: Core.CoreExpr -> EscM (Core.Expr MarkedVar, Int)
 escAnalRhs expr
   = do
@@ -785,8 +820,15 @@ fromCoreExpr env expr (fs, end) = go [] env expr fs end
         in go binds env e1 (App e2' : fs) end
       Core.Lam x e       -> done $ fromCoreLams env x e
       Core.Let bs e      ->
-        let (env', bs')   = fromCoreBind env (Just (fs, end)) bs
-        in go (bs' : binds) env' e fs end
+        let (env', bs', share_kont) = fromCoreBind env (Just (fs, end)) bs
+            ty = substTy (fce_subst env') (Core.exprType (unmarkExpr e))
+        in if share_kont then done $ Compute ty (Let bs' (
+                                       fromCoreExpr env' e ([], Return)))
+                         else go (bs' : binds) env' e fs end
+          -- Subtlety: If we have to share the continuation, we must be in an
+          -- escaping context, and thus the only join variables free in e are
+          -- those defined by bs', so < compute (let bs' in [| e |]) | fs, end >
+          -- (as returned in the share_kont case) is well-scoped.
       Core.Case e (Marked x _) retTy as
         -- Copy the continuation into the branches if safe.
         | copy_kont -> go binds env e [] copying_end
@@ -969,30 +1011,49 @@ fromCoreAlt env kont (ac, bs, e)
         e' = fromCoreExpr (env { fce_subst = subst' }) e kont
     in Alt ac bs' e'
 
--- | Translates a Core binding into Sequent Core.
-fromCoreBind :: FromCoreEnv -> Maybe SeqCoreKont -> Core.Bind MarkedVar
-             -> (FromCoreEnv, SeqCoreBind)
+-- | Translates a Core binding into Sequent Core. If any pairs in the given
+-- binding are marked as MakeKont, the continuation must not be Nothing (as
+-- there can be no top-level join bindings).
+fromCoreBind :: FromCoreEnv         -- Environment outside binding
+             -> Maybe SeqCoreKont   -- Continuation if not top-level binding
+             -> Core.Bind MarkedVar -- Binding
+             -> (FromCoreEnv,       -- Environment inside binding
+                 SeqCoreBind,       -- Tranlated binding
+                 Bool)              -- Whether the continuation is being shared
 fromCoreBind (env@FCE { fce_subst = subst }) kont_maybe bind =
   case bind of
-    Core.NonRec (Marked x mark) rhs -> (env_final, NonRec pair')
+    Core.NonRec (Marked x mark) rhs -> (env_final, NonRec pair', share_kont)
       where
         (subst', x') = substBndr subst x
         env' = env { fce_subst = subst' }
-        env_final | MakeKont _ <- mark = bindAsJoin env' x' conv
-                  | otherwise          = env'
-        (~(Just conv), pair') = fromCoreBindPair env kont_maybe x' mark rhs
+        contifying | MakeKont _ <- mark = assert (isJust kont_maybe) True
+                   | otherwise          = False
+        env_final  | contifying = bindAsJoin env' x' conv
+                   | otherwise  = env'
+        share_kont = contifying && not (isTrivialKont (fromJust kont_maybe))
+        rhs_kont_maybe | share_kont = Just ([], Return)
+                       | otherwise  = kont_maybe
+        (~(Just conv), pair') = fromCoreBindPair env rhs_kont_maybe x' mark rhs
 
-    Core.Rec pairs -> (env_final, Rec pairs_final)
+    Core.Rec pairs -> (env_final, Rec pairs_final, share_kont)
       where
         xs = map (unmark . fst) pairs
         (subst', xs') = assert (all isId xs) $ substRecBndrs subst xs
         env' = env { fce_subst = subst' }
-        pairs' = [ fromCoreBindPair env_final kont_maybe x' mark rhs
+        contifying | any will_bind_join pairs = assert (isJust kont_maybe) True
+                   | otherwise                = False
+        pairs' = [ fromCoreBindPair env_final rhs_kont_maybe x' mark rhs
                  | (Marked _ mark, rhs) <- pairs
                  | x' <- xs' ]
         env_final = bindAsJoins env' [ (binderOfPair pair, conv)
                                      | (Just conv, pair) <- pairs' ]
+        share_kont = contifying && not (isTrivialKont (fromJust kont_maybe))
+        rhs_kont_maybe | share_kont = Just ([], Return)
+                       | otherwise  = kont_maybe
         pairs_final = map snd pairs'
+
+        will_bind_join (Marked _ (MakeKont _), _) = True
+        will_bind_join _                          = False
 
 fromCoreBindPair :: FromCoreEnv -> Maybe SeqCoreKont -> Var -> KontOrFunc
                  -> Core.Expr MarkedVar -> (Maybe KontCallConv, SeqCoreBindPair)
@@ -1004,8 +1065,15 @@ fromCoreBindPair env kont_maybe x mark rhs
                             BindJoin (idToJoinId x (ByJump descs)) join)
       MakeFunc       -> (Nothing, BindTerm x $ fromCoreExprAsTerm env rhs)
 
-fromCoreBinds :: [Core.Bind MarkedVar] -> [SeqCoreBind]
-fromCoreBinds = snd . mapAccumL (\env -> fromCoreBind env Nothing) initFromCoreEnv
+fromCoreTopLevelBinds :: [Core.Bind MarkedVar] -> [SeqCoreBind]
+fromCoreTopLevelBinds = go initFromCoreEnv
+  where
+    go _ [] = []
+    go env (bind : binds)
+      = (bind' : binds')
+      where
+        (env', bind', False) = fromCoreBind env Nothing bind
+        binds' = go env' binds
 
 ------------------------------------------------
 -- Public interface for Sequent Core --> Core --
@@ -1202,5 +1270,5 @@ freshEtaId n subst ty
       where
         ty'     = substTy subst ty
         eta_id' = uniqAway (substInScope subst) $
-                  mkSysLocal (fsLit "eta") (mkBuiltinUnique n) ty'
+                  mkSysLocal (fsLit "txeta") (mkBuiltinUnique n) ty'
         subst'  = extendInScope subst eta_id'           
