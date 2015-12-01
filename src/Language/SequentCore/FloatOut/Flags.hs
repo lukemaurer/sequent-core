@@ -27,6 +27,7 @@ parseFloatFlags args = do
 data FloatGeneralFlag
   = Opt_ProtectLastValArg
   | Opt_IgnoreRealWorld
+  | Opt_FloatNullaryJoins   -- ^ Always allowed to float a nullary join point
 
   | Opt_LLF                 -- ^ Enable the late lambda lift pass
   | Opt_LLF_AbsUnsat        -- ^ allowed to abstract undersaturated applied let-bound variables?
@@ -131,7 +132,8 @@ fFlags = [
   ( "llf-simpl",                 Opt_LLF_Simpl, nop),
   ( "llf-stabilize",             Opt_LLF_Stabilize, nop),
   ( "llf-use-strictness",        Opt_LLF_UseStr, nop),
-  ( "llf-oneshot",               Opt_LLF_OneShot, nop)
+  ( "llf-oneshot",               Opt_LLF_OneShot, nop),
+  ( "float-nullary-joins",       Opt_FloatNullaryJoins, nop)
  ]
 
 type DynP = EwM (CmdLineP FloatFlags)

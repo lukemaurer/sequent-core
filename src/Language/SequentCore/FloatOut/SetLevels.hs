@@ -800,6 +800,9 @@ goto), but it's disastrous if the join point becomes a closure, increasing
 allocation for no benefit. *But* if we're floating the join point to top level,
 there's no issue with allocation and we may make something unfoldably small. So
 we float but *only* all the way, in both regular floating and LLL.
+
+Nullary join points are a different matter; if we decontify one, it'll become a
+thunk *but* we may increase sharing.
 -}
 
 {-
@@ -991,8 +994,8 @@ lvlBind env ty bind@(_, AnnNonRec pair)
           -- We can't float an unlifted binding to top level, so we don't 
           -- float it at all.  It's a bit brutal, but unlifted bindings 
           -- aren't expensive either
-  , isTopLvl dest_lvl || is_term
-          -- Never float a join point except to top level
+  , isTopLvl dest_lvl || is_term || (is_nullary_join && fgopt Opt_FloatNullaryJoins (le_fflags env))
+          -- Never float a non-nullary join point except to top level
           -- Note [Floating joins]
   = do_float dest_lvl abs_vars
   | otherwise
@@ -1000,6 +1003,8 @@ lvlBind env ty bind@(_, AnnNonRec pair)
   where
     bndr = binderOfAnnPair pair
     is_term = bindsTerm (deAnnotateBindPair pair)
+    is_nullary_join | (_, AnnBindJoin _ (_, AnnJoin [] _)) <- pair = True
+                    | otherwise                                    = False
     TB var _ = bndr
     no_float
       = do { let bind_lvl              = incMinorLvl (le_ctxt_lvl env)
@@ -1028,14 +1033,18 @@ lvlBind env ty bind@(_, AnnNonRec pair)
 
 lvlBind env ty bind@(_, AnnRec pairs)
   | Just (dest_lvl, abs_vars) <- decideBindFloat env ty bind
-  , isTopLvl dest_lvl || not (any (bindsJoin . deAnnotateBindPair) pairs)
-          -- Never float a join point except to top level
+  , isTopLvl dest_lvl || not (any binds_unfloatable_join pairs)
+          -- Never float a non-nullary join point except to top level
           -- Note [Floating joins]
   = do_float dest_lvl abs_vars
   | otherwise
   = no_float
   where
     bndrs = map binderOfAnnPair pairs
+    binds_unfloatable_join (_, AnnBindJoin _ (_, AnnJoin xs _))
+      = not (fgopt Opt_FloatNullaryJoins (le_fflags env) && null xs)
+    binds_unfloatable_join _
+      = False
 
     no_float
       = do { let bind_lvl = incMinorLvl (le_ctxt_lvl env)
