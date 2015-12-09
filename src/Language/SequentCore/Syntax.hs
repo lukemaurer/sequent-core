@@ -85,7 +85,7 @@ import qualified Type
 import TysPrim
 import TysWiredIn
 import Util      ( count )
-import Var       ( Var, isId )
+import Var       ( Var, isId, varType )
 import VarEnv
 
 import Control.Monad ( guard )
@@ -1105,9 +1105,9 @@ termIsHNFLike isCon isHNFUnf term
 -- Continuation ids
 --------------------------------------------------------------------------------
 
--- | Find whether an id is a join id.
+-- | Find whether a variable is a join id.
 isJoinId :: Id -> Bool
-isJoinId x = isKontTy (idType x)
+isJoinId x = isKontTy (varType x)
 
 -- | Find the type of the argument to a continuation of the given type. For a
 -- join point, this will be either an unboxed tuple or an unboxed existential

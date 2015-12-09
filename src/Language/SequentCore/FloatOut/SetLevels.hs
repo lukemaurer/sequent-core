@@ -115,6 +115,7 @@ import Data.List           ( mapAccumL )
 #define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
 #define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
 #define WARN( e, msg ) (warnPprTrace (e) __FILE__ __LINE__ (msg)) $
+#define MASSERT(e)     ASSERT(e) return ()
 
 {-
 %************************************************************************
@@ -1024,7 +1025,8 @@ lvlBind env ty bind@(_, AnnNonRec pair)
 
       | otherwise
       = do {  -- Yes, type abstraction; create a new binder, extend substitution, etc
-             let (env1, pair1) = decontifyBindPair env ty pair
+             MASSERT(all (not . isJoinId) abs_vars)
+           ; let (env1, pair1) = decontifyBindPair env ty pair
                  bndr1 = binderOfAnnPair pair1
            ; (new_env, [fresh_bndr]) <- newPolyBndrs dest_lvl env1 abs_vars [bndr1]
            ; let new_bndr = TB fresh_bndr (FloatMe dest_lvl)
@@ -1062,7 +1064,8 @@ lvlBind env ty bind@(_, AnnRec pairs)
            ; return (Rec new_pairs, new_env) }
 
       | otherwise  -- Non-null abs_vars
-      = do { let (env1, pairs1) = decontifyBindPairs env ty pairs
+      = do { MASSERT(all (not . isJoinId) abs_vars)
+           ; let (env1, pairs1) = decontifyBindPairs env ty pairs
                  bndrs1 = map binderOfAnnPair pairs1
            ; (new_env, fresh_bndrs) <- newPolyBndrs dest_lvl env1 abs_vars bndrs1
            ; let new_bndrs = [TB b (FloatMe dest_lvl) | b <- fresh_bndrs]
@@ -1212,6 +1215,7 @@ expandFloatedIds :: LevelEnv -> {- In -} VarSet -> {- Out -} IdSet
 expandFloatedIds env = foldVarSet snoc emptyVarSet where
   snoc id acc
     | isId id
+    , not (isCoVar id)
     = case lookupVarEnv (le_env env) id of
         Nothing -> extendVarSet acc id -- TODO is this case possible?
         Just (new_id, filter isId -> abs_ids)
@@ -1232,6 +1236,8 @@ wouldIncreaseRuntime env abs_ids binding_group_vus
     mkVarSet (filter bad_id abs_ids)
   where
     bad_id abs_id
+      | isJoinId abs_id
+      = True               -- *Cannot* abstract over join id (and wouldn't want to)
       | idArity abs_id > 0 -- NB (arity > 0) iff "is known function"
                            -- FIXME This is not true under CallArity! Should
                            -- remember which binders are let-bound to functions
@@ -1701,8 +1707,8 @@ decontifyBndr le retTy (TB bndr summ)
 add_id :: IdEnv (OutVar, [OutVar]) -> (Var, Var) -> IdEnv (OutVar, [OutVar])
 add_id id_env (v, v1)
   | isTyVar v = delVarEnv    id_env v
-  | otherwise = ASSERT(not (isCoVar v1))
-                extendVarEnv id_env v (v1, [])
+  | isCoVar v = delVarEnv    id_env v
+  | otherwise = extendVarEnv id_env v (v1, [])
 
 zap_demand_info :: Var -> Var
 zap_demand_info v
