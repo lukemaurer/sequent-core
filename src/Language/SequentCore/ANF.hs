@@ -354,8 +354,7 @@ anfEval term frames end
       where
         go acc term' ty demands floats frames
           = case frames of
-              [] -> MASSERT(null demands) >>
-                    return (floats, term', reverse acc)
+              [] -> return (floats, term', reverse acc)
               frame@(App (Type argTy)) : frames'
                 -> go (frame : acc) term' (ty `applyTy` argTy) demands floats frames'
               frame@(App (Coercion argCo)) : frames'
@@ -465,11 +464,14 @@ data FloatingBind
 newtype FloatingJoinBind
   = FloatLetJoin SeqCoreBind -- INVARIANT: Must bind join(s)
 
--- TODO I'm keeping the logic from CorePrep that turns all unlifted bindings
+-- XXX I'm keeping the logic from CorePrep that turns all unlifted bindings
 -- into cases, but it's not really necessary here. But since we need to track
 -- ok-for-speculation anyway, I don't think we would gain much by allowing lets
 -- to be unlifted, and if the simplifier runs after this, it'll happily turn the
 -- ok-for-spec cases back into lets.
+
+-- Also, we don't turn strict lets into cases. Seems premature here, and for some
+-- reason, it was causing treejoin to loop.
 
 data Floats = Floats OkToSpec (OrdList FloatingBind) (OrdList FloatingJoinBind)
 
@@ -500,17 +502,15 @@ data OkToSpec
 
 mkFloat :: Demand -> Bool -> AnfBindPair -> Floats
 mkFloat dmd is_unlifted (BindTerm bndr rhs)
-  | use_case  = unitFloat $ FloatCase bndr (Eval rhs [] Return) (termOkForSpeculation rhs)
+  | use_case  = unitFloat $ FloatCase bndr (Eval rhs [] Return) ok_spec
   | is_hnf    = unitFloat $ FloatLet (NonRec (BindTerm bndr                       rhs))
   | otherwise = unitFloat $ FloatLet (NonRec (BindTerm (setIdDemandInfo bndr dmd) rhs))
                    -- See Note [Pin demand info on floats]
   where
     is_hnf    = termIsHNF rhs
-    is_strict = isStrictDmd dmd
-    use_case  = is_unlifted || is_strict && not is_hnf
-                -- Don't make a case for a value binding,
-                -- even if it's strict.  Otherwise we get
-                --      case (\x -> e) of ...!
+    ok_spec   = termOkForSpeculation rhs
+    use_case  = is_unlifted
+                  -- Don't turn strict lets into cases just yet
 mkFloat dmd _is_unlifted (BindJoin bndr join)
   = unitJoinFloat $ FloatLetJoin (NonRec (BindJoin (setIdDemandInfo bndr dmd) join))
 
