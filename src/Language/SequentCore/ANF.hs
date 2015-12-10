@@ -50,7 +50,6 @@ import Control.Monad
 #define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
 #define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
 #define WARN( e, msg ) (warnPprTrace (e) __FILE__ __LINE__ (msg)) $
-#define MASSERT(e)      ASSERT(e) return ()
 
 {-
 Invariants
@@ -354,8 +353,7 @@ anfEval term frames end
       where
         go acc term' ty demands floats frames
           = case frames of
-              [] -> MASSERT(null demands) >>
-                    return (floats, term', reverse acc)
+              [] -> return (floats, term', reverse acc)
               frame@(App (Type argTy)) : frames'
                 -> go (frame : acc) term' (ty `applyTy` argTy) demands floats frames'
               frame@(App (Coercion argCo)) : frames'
