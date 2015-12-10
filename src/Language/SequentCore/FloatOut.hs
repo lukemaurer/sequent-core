@@ -27,10 +27,12 @@ import Language.SequentCore.Plugin
 import Language.SequentCore.Syntax
 import Language.SequentCore.Syntax.Util
 
+import BasicTypes       ( CompilerPhase(..) )
 import CoreSyn          ( tickishScoped, mkNoCount )
-import CoreMonad        ( FloatOutSwitches(..)
+import CoreMonad        ( FloatOutSwitches(..), SimplifierMode(..)
                         , CoreM, CoreToDo(..), Plugin(..)
-                        , defaultPlugin, reinitializeGlobals )
+                        , defaultPlugin, reinitializeGlobals
+                        , runMaybe, runWhen )
 import DynFlags
 import HscTypes         ( ModGuts(..) )
 import ErrUtils         ( dumpIfSet_dyn, errorMsg )
@@ -69,10 +71,10 @@ plugin = defaultPlugin {
         vcat (map text leftovers)
     unless (null warns) $
       liftIO $ errorMsg dflags $ vcat (map text warns)
-    let todos' = replace fflags todos
+    let todos' = replace dflags fflags todos
     return todos'
 } where
-  replace fflags = go True
+  replace dflags fflags = go True
     where
       go top (CoreDoFloatOutwards switches : todos)
         = normalPass switches : go top todos
@@ -82,7 +84,7 @@ plugin = defaultPlugin {
         = todo : go top todos
       go top []
         | top, fgopt FloatFlags.Opt_LLF fflags
-        = [finalPass]
+        = [finalPass, simplAfterFinalPass]
         | otherwise
         = []
 
@@ -94,6 +96,10 @@ plugin = defaultPlugin {
         = CoreDoPluginPass "Late lambda-lifting (Sequent Core)"
                            (runFloatOut switchesForFinal fflags
                                         (Just finalPassSwitches) )
+
+      simplAfterFinalPass
+        = runWhen (fgopt FloatFlags.Opt_LLF_Simpl fflags) $
+            simpl_phase 0 ["post-late-lam-lift"] max_iter
 
       switchesForFinal = FloatOutSwitches
         { floatOutLambdas             = FloatFlags.lateFloatNonRecLam fflags
@@ -115,6 +121,52 @@ plugin = defaultPlugin {
         , fps_strictness     = fgopt FloatFlags.Opt_LLF_UseStr       fflags
         , fps_oneShot        = fgopt FloatFlags.Opt_LLF_OneShot      fflags
         }
+        
+      max_iter      = maxSimplIterations dflags
+      rule_check    = ruleCheck          dflags
+
+      rules_on      = gopt Opt_EnableRewriteRules           dflags
+      eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
+
+      maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
+
+      maybe_strictness_before phase
+        = runWhen (phase `elem` strictnessBefore dflags) CoreDoStrictness
+
+      base_mode = SimplMode { sm_phase      = panic "base_mode"
+                            , sm_names      = []
+                            , sm_rules      = rules_on
+                            , sm_eta_expand = eta_expand_on
+                            , sm_inline     = True
+                            , sm_case_case  = True }
+
+      simpl_phase phase names iter
+        = CoreDoPasses
+        $   [ maybe_strictness_before phase
+            , CoreDoSimplify iter
+                  (base_mode { sm_phase = Phase phase
+                             , sm_names = names })
+
+            , maybe_rule_check (Phase phase) ]
+
+            -- Vectorisation can introduce a fair few common sub expressions involving
+            --  DPH primitives. For example, see the Reverse test from dph-examples.
+            --  We need to eliminate these common sub expressions before their definitions
+            --  are inlined in phase 2. The CSE introduces lots of  v1 = v2 bindings,
+            --  so we also run simpl_gently to inline them.
+        ++  (if gopt Opt_Vectorise dflags && phase == 3
+              then [CoreCSE, simpl_gently]
+              else [])
+
+          -- initial simplify: mk specialiser happy: minimum effort please
+      simpl_gently = CoreDoSimplify max_iter
+                         (base_mode { sm_phase = InitialPhase
+                                    , sm_names = ["Gentle"]
+                                    , sm_rules = rules_on   -- Note [RULEs enabled in SimplGently]
+                                    , sm_inline = False
+                                    , sm_case_case = False })
+                            -- Don't do case-of-case transformations.
+                            -- This makes full laziness work better
 
 runFloatOut :: FloatOutSwitches -> FloatFlags -> Maybe FinalPassSwitches
             -> ModGuts
