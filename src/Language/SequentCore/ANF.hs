@@ -589,15 +589,18 @@ deFloatTop (Floats _ floats joins)
   | otherwise
   = foldrOL get [] floats
   where
-    get (FloatLet b) bs = occurAnalyseRHSs b : bs
+    get (FloatLet b) bs = process b : bs
     get b            _  = pprPanic "anfProgram" (ppr b)
 
     -- See Note [Dead code in CorePrep]
-    occurAnalyseRHSs (NonRec (BindTerm x e))
-      = NonRec (BindTerm x (occurAnalyseTerm_NoBinderSwap e))
-    occurAnalyseRHSs (Rec xes)
-      = Rec [BindTerm x (occurAnalyseTerm_NoBinderSwap e) | BindTerm x e <- xes]
-    occurAnalyseRHSs b
+    -- Zap demand info; it makes no sense at top level, and CoreLint complains
+    -- about strict top-level binders
+    process (NonRec (BindTerm x e))
+      = NonRec (BindTerm (zapDemandIdInfo x) (occurAnalyseTerm_NoBinderSwap e))
+    process (Rec xes)
+      = Rec [ BindTerm (zapDemandIdInfo x) (occurAnalyseTerm_NoBinderSwap e)
+            | BindTerm x e <- xes ]
+    process b
       = pprPanic "anfProgram" (ppr b)
 
 ---------------------------------------------------------------------------

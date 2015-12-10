@@ -34,7 +34,8 @@ import CoreMonad        ( FloatOutSwitches(..)
 import DynFlags
 import HscTypes         ( ModGuts(..) )
 import ErrUtils         ( dumpIfSet_dyn, errorMsg )
-import Id               ( Id, idArity, isBottomingId )
+import Id               ( Id, idArity, isBottomingId
+                        , isStrictId, zapDemandIdInfo )
 import Var              ( Var )
 import UniqSupply       ( UniqSupply, getUniqueSupplyM )
 import Bag
@@ -638,7 +639,11 @@ instance Monoid FloatBinds where
 flattenTopFloats :: FloatBinds -> Bag SeqCoreBind
 flattenTopFloats (FB tops defs) 
   = ASSERT2( isEmptyBag (flattenMajor defs), ppr defs )
-    tops 
+    mapBag (mapBindersOfBind zapDemandIdInfo) tops
+      -- Can't have strict lets at top level. This appears to happen only if
+      -- the let was created during pre-prep to name a strict argument and then
+      -- floated to top level.
+      -- TODO: Figure out why this never has to be done in original FloatOut.
 
 addTopFloatPairs :: Bag SeqCoreBind -> [SeqCoreBindPair] -> [SeqCoreBindPair]
 addTopFloatPairs float_bag prs
