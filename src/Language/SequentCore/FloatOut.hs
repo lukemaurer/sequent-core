@@ -36,8 +36,7 @@ import CoreMonad        ( FloatOutSwitches(..), SimplifierMode(..)
 import DynFlags
 import HscTypes         ( ModGuts(..) )
 import ErrUtils         ( dumpIfSet_dyn, errorMsg )
-import Id               ( Id, idArity, isBottomingId
-                        , isStrictId, zapDemandIdInfo )
+import Id               ( Id, idArity, isBottomingId, zapDemandIdInfo )
 import Var              ( Var )
 import UniqSupply       ( UniqSupply, getUniqueSupplyM )
 import Bag
