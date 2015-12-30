@@ -86,11 +86,15 @@ fvsFromSumm = mapVarEnv fst . sm_varsUsed
 -- Implementation --
 --------------------
 
-summarizeProgram :: SeqCoreProgram -> SummProgram
-summarizeProgram = map summTopBind
+type TopVars = VarSet -- remember top-level vars to avoid counting them as free
 
-summTopBind :: SeqCoreBind -> SummBind
-summTopBind bind
+summarizeProgram :: SeqCoreProgram -> SummProgram
+summarizeProgram pgm = map (summTopBind tops) pgm
+  where
+    tops = mkVarSet (bindersOfBinds pgm)
+
+summTopBind :: TopVars -> SeqCoreBind -> SummBind
+summTopBind tops bind
   -- We don't need summaries of the scopes of top-level bindings, so just leave
   -- them empty
   = case bind of
@@ -98,125 +102,128 @@ summTopBind bind
       Rec pairs   -> (emptySumm, AnnRec    (doPair <$> pairs))
   where
     doPair (BindTerm bndr term)
-      = (emptySumm, AnnBindTerm (TB bndr NoSummary) (summRhsTerm term))
+      = (emptySumm, AnnBindTerm (TB bndr NoSummary) (summRhsTerm tops term))
     doPair pair@(BindJoin {})
       = pprPanic "summTopBind" (text "Top-level join" $$ ppr pair)
 
-summBindPair :: Summary -- Summary of scope
+summBindPair :: TopVars
+             -> Summary -- Summary of scope
              -> SeqCoreBindPair -> SummBindPair
 -- Note that, if this port of a recursive binding, the summary covers the RHS,
 -- so we're tying the knot
-summBindPair scopeSumm (BindTerm bndr rhs)
+summBindPair tops scopeSumm (BindTerm bndr rhs)
   = (summ', AnnBindTerm (TB bndr (BindSummary scopeSumm)) rhs')
   where
-    rhs'  = summRhsTerm rhs
+    rhs'  = summRhsTerm tops rhs
     summ  = getSummary rhs'
     skel  = sm_skeleton summ
     skel' | isId bndr = cloSk bndr (getFreeVarsSumm rhs') skel
           | otherwise = assert (isNilSk skel) nilSk
-    summ' = (summ `unionSumm` bndrSumm bndr) { sm_skeleton = skel' }
-summBindPair scopeSumm (BindJoin bndr rhs)
+    summ' = (summ `unionSumm` bndrSumm tops bndr) { sm_skeleton = skel' }
+summBindPair tops scopeSumm (BindJoin bndr rhs)
   = (summ', AnnBindJoin (TB bndr (BindSummary scopeSumm)) rhs')
   where
-    rhs'  = summJoin rhs
+    rhs'  = summJoin tops rhs
     summ  = getSummary rhs'
-    summ' = summ `unionSumm` bndrSumm bndr
+    summ' = summ `unionSumm` bndrSumm tops bndr
               -- No need to update skeleton because no closure is created
 
-summJoin :: SeqCoreJoin -> SummJoin
-summJoin (Join bndrs comm)
-  = case summCommand comm of
+summJoin :: TopVars -> SeqCoreJoin -> SummJoin
+summJoin tops (Join bndrs comm)
+  = case summCommand tops comm of
       comm'@(summ, _) -> (summ', AnnJoin bndrs' comm')
         where
           bndrs' = [TB bndr NoSummary | bndr <- bndrs]
           summ'  = bndrs `delBindersSumm` summ
 
-summRhsTerm :: SeqCoreTerm -> SummTerm
-summRhsTerm term = summTerm term 0
+summRhsTerm :: TopVars -> SeqCoreTerm -> SummTerm
+summRhsTerm tops term = summTerm tops term 0
 
-summTerm :: SeqCoreTerm
+summTerm :: TopVars
+         -> SeqCoreTerm
          -> Int -- Number of value arguments
          -> SummTerm
-summTerm (Lit lit)     _ = (emptySumm, AnnLit lit)
-summTerm (Type ty)     _ = (summFromFVs (tyVarsOfType ty), AnnType ty)
-summTerm (Coercion co) _ = (summFromFVs (coVarsOfCo co), AnnCoercion co)
-summTerm (Var id)      n = (varSumm id n, AnnVar id)
+summTerm _    (Lit lit)     _ = (emptySumm, AnnLit lit)
+summTerm _    (Type ty)     _ = (summFromFVs (tyVarsOfType ty), AnnType ty)
+summTerm _    (Coercion co) _ = (summFromFVs (coVarsOfCo co), AnnCoercion co)
+summTerm tops (Var id)      n = (varSumm tops id n, AnnVar id)
 
-summTerm (Lam bndr body) _
+summTerm tops (Lam bndr body) _
   = (summ', AnnLam (TB bndr NoSummary) body')
   where
-    body' = summRhsTerm body
+    body' = summRhsTerm tops body
     summ  = getSummary body'
     skel  = lamSk (isOneShotBndr bndr) (sm_skeleton summ)
     summ' = bndr `delBinderSumm` summ { sm_skeleton = skel }
 
-summTerm (Compute ty comm) _
+summTerm tops (Compute ty comm) _
   = (getSummary comm', AnnCompute ty comm')
   where
-    comm' = summCommand comm
+    comm' = summCommand tops comm
 
-summCommand :: SeqCoreCommand -> SummCommand
-summCommand (Let (NonRec pair) body)
+summCommand :: TopVars -> SeqCoreCommand -> SummCommand
+summCommand tops (Let (NonRec pair) body)
   = (summ, AnnLet (bindSumm, AnnNonRec pair') body')
   where
-    body'     = summCommand body
+    body'     = summCommand tops body
     bodySumm  = getSummary body'
     scopeSumm = bodySumm -- binder scopes over the body only
-    pair'     = summBindPair scopeSumm pair
+    pair'     = summBindPair tops scopeSumm pair
     bindSumm  = getSummary pair'
     bndr      = binderOfPair pair
     summ      = bindSumm `unionSumm` (bndr `delBinderSumm` scopeSumm)
-summCommand (Let (Rec pairs) body)
+summCommand tops (Let (Rec pairs) body)
   = (summ, AnnLet (bindSumm, AnnRec pairs') body')
   where
-    body'     = summCommand body
+    body'     = summCommand tops body
     bodySumm  = getSummary body'
     scopeSumm = bodySumm `unionSumm` bindSumm -- binder scopes over bind and body
-    pairs'    = map (summBindPair scopeSumm) pairs
-    bindSumm  = unionSumms (map getSummary pairs') -- knotted with scopeSumm
+    pairs'    = map (summBindPair tops scopeSumm) pairs
+    bindSumm  = bndrs `delBindersSumm` unionSumms (map getSummary pairs')
+                  -- knotted with scopeSumm
     bndrs     = map binderOfPair pairs
     summ      = bndrs `delBindersSumm` scopeSumm
-summCommand (Eval term frames end)
+summCommand tops (Eval term frames end)
   = (summ', AnnEval term' frames' end')
   where
-    term'   = summTerm term (count isValueAppFrame frames)
-    frames' = map summFrame frames
-    end'    = summEnd end
+    term'   = summTerm tops term (count isValueAppFrame frames)
+    frames' = map (summFrame tops) frames
+    end'    = summEnd tops end
     
     termSumm  = getSummary term'
     frameSumm = unionSumms (map getSummary frames')
     endSumm   = getSummary end'
     summ'     = termSumm `unionSumm` frameSumm `unionSumm` endSumm
-summCommand (Jump args j)
+summCommand tops (Jump args j)
   = (summ', AnnJump args' j)
   where
-    args' = map summRhsTerm args
-    summ' = varSumm j (length args) `unionSumm` unionSumms (map getSummary args')
+    args' = map (summRhsTerm tops) args
+    summ' = varSumm tops j (length (filter isValueArg args)) `unionSumm` unionSumms (map getSummary args')
 
-summFrame :: SeqCoreFrame -> SummFrame
-summFrame (App arg) = (getSummary arg', AnnApp arg')
+summFrame :: TopVars -> SeqCoreFrame -> SummFrame
+summFrame tops (App arg) = (getSummary arg', AnnApp arg')
   where
-    arg' = summRhsTerm arg
-summFrame (Cast co) = (summFromFVs (coVarsOfCo co), AnnCast co)
-summFrame (Tick ti) = (summ, AnnTick ti)
+    arg' = summRhsTerm tops arg
+summFrame _    (Cast co) = (summFromFVs (coVarsOfCo co), AnnCast co)
+summFrame _    (Tick ti) = (summ, AnnTick ti)
   where
     summ | Breakpoint _ ids <- ti = summFromFVs (mkVarSet ids)
          | otherwise              = emptySumm
 
-summEnd :: SeqCoreEnd -> SummEnd
-summEnd Return = (emptySumm, AnnReturn)
-summEnd (Case bndr alts)
+summEnd :: TopVars -> SeqCoreEnd -> SummEnd
+summEnd _    Return = (emptySumm, AnnReturn)
+summEnd tops (Case bndr alts)
   = (summ', AnnCase (TB bndr NoSummary) alts')
   where
-    alts' = map summAlt alts
+    alts' = map (summAlt tops) alts
     summs = map getSummary alts'
     summ' = bndr `delBinderSumm` unionAltSumms summs
 
-summAlt :: SeqCoreAlt -> SummAlt
-summAlt (Alt con bndrs rhs)
+summAlt :: TopVars -> SeqCoreAlt -> SummAlt
+summAlt tops (Alt con bndrs rhs)
   = (bndrs `delBindersSumm` getSummary rhs', AnnAlt con bndrs' rhs')
   where
-    rhs'   = summCommand rhs
+    rhs'   = summCommand tops rhs
     bndrs' = [ TB bndr NoSummary | bndr <- bndrs ]
 
 ---------------
@@ -248,17 +255,22 @@ summFromFVs :: VarSet -> Summary
 summFromFVs fvs = Summary { sm_varsUsed = tagVarSet fvs, sm_skeleton = nilSk }
 
 -- | Free variables from type, rules, and unfolding
-bndrSumm :: Var -> Summary
+bndrSumm :: TopVars -> Var -> Summary
   -- We just get free variables, not usage data, from the rules and unfolding.
   -- The unfolding should be redundant and the rules don't matter much for
   -- non-top-level functions.
-bndrSumm var | isId var  = summFromFVs (CoreFVs.idFreeVars var)
-             | otherwise = summFromFVs (CoreFVs.varTypeTyVars var)
+bndrSumm tops var | isId var  = summFromFVs (filterVarSet notTop
+                                              (CoreFVs.idFreeVars var))
+                  | otherwise = summFromFVs (CoreFVs.varTypeTyVars var)
+  where
+    notTop v = not (v `elemVarSet` tops)
 
-varSumm :: Var -> Int -> Summary
-varSumm var nValArgs
-  | isLocalVar var = emptySumm { sm_varsUsed = aFreeVar var nValArgs }
-  | otherwise      = emptySumm
+varSumm :: TopVars -> Var -> Int -> Summary
+varSumm tops var nValArgs
+  | isLocalVar var, not (var `elemVarSet` tops)
+  = emptySumm { sm_varsUsed = aFreeVar var nValArgs }
+  | otherwise
+  = emptySumm
 
 delBinderSumm :: Var -> Summary -> Summary
 delBinderSumm var summ = summ { sm_varsUsed = var `delBinderVU` sm_varsUsed summ }
@@ -284,7 +296,9 @@ noFVs = emptyVarEnv
 aFreeVar :: Var -> Int -> VarUses
 aFreeVar var nValArgs = unitVarEnv var (var, use)
   where
-    use | nValArgs == 0  = unappSummary
+    use | nValArgs == 0
+        , not (isJoinId var)
+        = unappSummary
         | otherwise
         = case nValArgs `compare` arity of
             LT          -> unsatSummary
