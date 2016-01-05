@@ -61,10 +61,10 @@ module Language.SequentCore.FloatOut.SetLevels (
         incMinorLvl, ltMajLvl, ltLvl, isTopLvl
     ) where
 
-import Language.SequentCore.ANF
 import Language.SequentCore.FloatOut.Flags as FloatFlags
 import Language.SequentCore.FloatOut.Summary
 import Language.SequentCore.FVs
+import Language.SequentCore.PrePrep
 import Language.SequentCore.Syntax
 import Language.SequentCore.Translate
 
@@ -301,7 +301,7 @@ prepareForFinalPass dflags fflags us binds
            = stabilizeExposedUnfoldings dflags binds
            | otherwise = binds
     
-    binds_final = anfProgram us binds1
+    binds_final = prePrepProgram us binds1
     
 stabilizeExposedUnfoldings :: DynFlags -> SeqCoreProgram -> SeqCoreProgram
 stabilizeExposedUnfoldings dflags binds
@@ -376,7 +376,7 @@ The late lambda-lift pass is "late" for two reasons:
 
 For these same reasons, we want to do a bit of preprocessing before we begin:
 
-1. We run the code through an ANF transform that performs a subset of the same
+1. We run the code through a transform that performs a subset of the same
    changes that CorePrep will make, namely those that will affect LLL decisions.
 
 2. Putting LLL last in the pipeline keeps it from mucking with *this* module's

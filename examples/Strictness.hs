@@ -21,7 +21,7 @@ strictCall b x y z w = plusS b (case divMod z w of (q, r) -> q + r)
                                (let {-# NOINLINE a #-}
                                     a = x + y in a * a)
 
--- Case should came to top; let should float and a*a should get ANF'd
+-- Case should came to top; let should float and a*a should get let-bound
 strictDupCall b x y z w = plusS b (case divMod z w of (q, 0) -> 2 * q
                                                       (q, r) -> q + r)
                                   (let {-# NOINLINE a #-}

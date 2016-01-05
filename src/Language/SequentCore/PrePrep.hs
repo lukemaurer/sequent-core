@@ -1,28 +1,28 @@
 -- |
--- Module      : Language.SequentCore.ANF
--- Description : Administrative Normal Form transformation
+-- Module      : Language.SequentCore.PrePrep
+-- Description : CorePrep-like transformation
 -- Maintainer  : maurerl@cs.uoregon.edu
 -- Stability   : experimental
 --
 -- A simple global transfomation that binds every argument to every function in
 -- a let-binding (or case binding if needed). CorePrep puts the final Core code
--- in this form, so decisions that depend on what the ANF code will look like
+-- in this form, so decisions that depend on what the prepped code will look like
 -- can use this module to perform the transform ahead of time.
 --
 -- In particular, CorePrep does some minor floating (similar to what the
 -- simplifier does) on the let-bindings it creates, so things like free-variable
 -- analysis may be sensitive to CorePrep's meddling.
 --
--- Using the ANF transform only makes sense for passes running at the end of the
+-- Using PrePrep only makes sense for passes running at the end of the
 -- Core-to-Core pipeline, since it may interfere with rule-matching and other
--- work. (There's a reason the code isn't in ANF until CorePrep!) The simplifier
--- *should* undo most of this, in the sense that running ANF and then the
+-- work. (There's a reason the code isn't in this form until CorePrep!) The simplifier
+-- *should* undo most of this, in the sense that running PrePrep and then the
 -- simplifier should be the same as just running the simplifier, but this isn't
 -- guaranteed. (TODO Find out for sure.)
 
 {-# LANGUAGE CPP #-}
 
-module Language.SequentCore.ANF ( anfProgram ) where
+module Language.SequentCore.PrePrep ( prePrepProgram ) where
 
 import Language.SequentCore.Lint
 import Language.SequentCore.OccurAnal
@@ -54,7 +54,7 @@ import Control.Monad
 {-
 Invariants
 ~~~~~~~~~~
-Here is the syntax of the Sequent Core produced by anfProgram:
+Here is the syntax of the Sequent Core produced by prePrepProgram:
 
     Trivial terms
        triv ::= lit  |  var  |  /\a. triv  |  /\c. triv  | compute trivc
@@ -74,7 +74,7 @@ Here is the syntax of the Sequent Core produced by anfProgram:
     
     Commands
        body ::= let(rec) x = rhs in body     -- Boxed only
-              | let(rec) join j (x...) = body in body
+              | let(rec) join j (x...) = body in body 
               | jump j(triv...)
               | < triv | frame ... end >
 
@@ -85,12 +85,12 @@ Here is the syntax of the Sequent Core produced by anfProgram:
        term ::= triv  |  compute body
 -}
 
-type AnfTriv      = SeqCoreTerm    -- Non-terminal 'triv'
-type AnfBody      = SeqCoreCommand -- Non-terminal 'body'
-type AnfRhs       = SeqCoreTerm    -- Non-terminal 'rhs'
-type AnfTerm      = SeqCoreTerm    -- Non-terminal 'term'
-type AnfJoin      = SeqCoreJoin
-type AnfBindPair  = SeqCoreBindPair
+type CpeTriv      = SeqCoreTerm    -- Non-terminal 'triv'
+type CpeBody      = SeqCoreCommand -- Non-terminal 'body'
+type CpeRhs       = SeqCoreTerm    -- Non-terminal 'rhs'
+type CpeTerm      = SeqCoreTerm    -- Non-terminal 'term'
+type CpeJoin      = SeqCoreJoin
+type CpeBindPair  = SeqCoreBindPair
 
 {-
 %************************************************************************
@@ -100,19 +100,19 @@ type AnfBindPair  = SeqCoreBindPair
 %************************************************************************
 -}
 
-anfProgram :: UniqSupply -> SeqCoreProgram -> SeqCoreProgram
-anfProgram us binds =
+prePrepProgram :: UniqSupply -> SeqCoreProgram -> SeqCoreProgram
+prePrepProgram us binds =
     initUs_ us $ do
-      floats <- anfTopBinds $ uniquifyProgram binds
+      floats <- cpeTopBinds $ uniquifyProgram binds
       let binds' = deFloatTop floats
-      return $ assertLintProgram "anfProgram" binds' $
-                 text "--- Pre-ANF ---" $$ pprTopLevelBinds binds
+      return $ assertLintProgram "cpeProgram" binds' $
+                 text "--- Pre-PrePrep ---" $$ pprTopLevelBinds binds
 
-anfTopBinds :: [SeqCoreBind] -> UniqSM Floats
+cpeTopBinds :: [SeqCoreBind] -> UniqSM Floats
 -- Note [Floating out of top level bindings]
-anfTopBinds []             = return emptyFloats
-anfTopBinds (bind : binds) = do bind'  <- anfBind TopLevel bind
-                                binds' <- anfTopBinds binds
+cpeTopBinds []             = return emptyFloats
+cpeTopBinds (bind : binds) = do bind'  <- cpeBind TopLevel bind
+                                binds' <- cpeTopBinds binds
                                 return (bind' `appendFloats` binds')
 
 {-
@@ -139,13 +139,13 @@ And then x will actually end up case-bound
 %************************************************************************
 -}
 
-anfBind :: TopLevelFlag -> SeqCoreBind
+cpeBind :: TopLevelFlag -> SeqCoreBind
         -> UniqSM Floats
-anfBind top_lvl (NonRec pair)
+cpeBind top_lvl (NonRec pair)
   = do { let bndr        = binderOfPair pair
              dmd         = idDemandInfo bndr
              is_unlifted = isUnLiftedType (idType bndr)
-       ; (floats, pair1) <- anfPair top_lvl NonRecursive
+       ; (floats, pair1) <- cpePair top_lvl NonRecursive
                                     dmd 
                                     is_unlifted
                                     pair
@@ -153,8 +153,8 @@ anfBind top_lvl (NonRec pair)
 
        ; return (floats `appendFloats` new_floats) }
 
-anfBind top_lvl (Rec pairs)
-  = do { stuff <- mapM (anfPair top_lvl Recursive topDmd False) pairs
+cpeBind top_lvl (Rec pairs)
+  = do { stuff <- mapM (cpePair top_lvl Recursive topDmd False) pairs
 
        ; let (floats_s, pairs1) = unzip stuff
              (term_pairs, join_pairs) = concatFloats floats_s
@@ -172,17 +172,17 @@ anfBind top_lvl (Rec pairs)
         -- Flatten all the floats, and the currrent
         -- group into a single giant Rec
     add_float (FloatLet bind) pairs2 = flattenBind bind ++ pairs2
-    add_float b               _      = pprPanic "anfBind" (ppr b)
+    add_float b               _      = pprPanic "cpeBind" (ppr b)
     
     add_join_float (FloatLetJoin bind) pairs2 = flattenBind bind ++ pairs2 
 
 ---------------
-anfPair :: TopLevelFlag -> RecFlag -> Demand -> Bool
+cpePair :: TopLevelFlag -> RecFlag -> Demand -> Bool
         -> SeqCoreBindPair
-        -> UniqSM (Floats, AnfBindPair)
+        -> UniqSM (Floats, CpeBindPair)
 -- Used for all bindings
-anfPair top_lvl is_rec dmd is_unlifted (BindTerm bndr rhs)
-  = do { (floats1, rhs1) <- anfRhsE rhs
+cpePair top_lvl is_rec dmd is_unlifted (BindTerm bndr rhs)
+  = do { (floats1, rhs1) <- cpeRhsE rhs
 
        -- See if we are allowed to float this stuff out of the RHS
        ; (floats2, rhs2) <- float_from_rhs floats1 rhs1
@@ -220,15 +220,15 @@ anfPair top_lvl is_rec dmd is_unlifted (BindTerm bndr rhs)
       = do { body <- rhsToBodyTermNF rhs
            ; return (emptyFloats, wrapBindsAroundBodyTerm floats body) }
 
-anfPair _top_lvl _is_rec _dmd _is_unlifted (BindJoin bndr rhs)
-  = do { rhs' <- anfJoin rhs
+cpePair _top_lvl _is_rec _dmd _is_unlifted (BindJoin bndr rhs)
+  = do { rhs' <- cpeJoin rhs
        ; return (emptyFloats, BindJoin bndr rhs') }
 
 -- ---------------------------------------------------------------------------
---              AnfRhs: produces a result satisfying AnfRhs
+--              CpeRhs: produces a result satisfying CpeRhs
 -- ---------------------------------------------------------------------------
 
-anfRhsE :: SeqCoreTerm -> UniqSM (Floats, AnfRhs)
+cpeRhsE :: SeqCoreTerm -> UniqSM (Floats, CpeRhs)
 -- If
 --      e  ===>  (bs, e')
 -- then
@@ -237,73 +237,73 @@ anfRhsE :: SeqCoreTerm -> UniqSM (Floats, AnfRhs)
 -- For example
 --      f (g x)   ===>   ([v = g x], f v)
 
-anfRhsE term@(Type {})      = return (emptyFloats, term)
-anfRhsE term@(Coercion {})  = return (emptyFloats, term)
-anfRhsE term@(Lit {})       = return (emptyFloats, term)
-anfRhsE term@(Var {})       = return (emptyFloats, term)
-anfRhsE term@(Lam {})
+cpeRhsE term@(Type {})      = return (emptyFloats, term)
+cpeRhsE term@(Coercion {})  = return (emptyFloats, term)
+cpeRhsE term@(Lit {})       = return (emptyFloats, term)
+cpeRhsE term@(Var {})       = return (emptyFloats, term)
+cpeRhsE term@(Lam {})
    = do { let (bndrs,body) = collectBinders term
-        ; body' <- anfBodyTermNF body
+        ; body' <- cpeBodyTermNF body
         ; return (emptyFloats, mkLambdas bndrs body') }
-anfRhsE      (Compute ty comm)
-   = do { (floats, comm') <- anfComm comm
+cpeRhsE      (Compute ty comm)
+   = do { (floats, comm') <- cpeComm comm
         ; let comm_with_join_floats = wrapJoinBinds floats comm'
               term_floats = dropJoinsFromFloats floats
         ; return (term_floats, Compute ty comm_with_join_floats) }
 
 -- ---------------------------------------------------------------------------
---              AnfBody: produces a result satisfying AnfBody
+--              CpeBody: produces a result satisfying CpeBody
 -- ---------------------------------------------------------------------------
 
-anfCommNF :: SeqCoreCommand -> UniqSM AnfBody
-anfCommNF comm
-  = do { (floats, comm') <- anfComm comm
+cpeCommNF :: SeqCoreCommand -> UniqSM CpeBody
+cpeCommNF comm
+  = do { (floats, comm') <- cpeComm comm
        ; return (wrapBinds floats comm') }
 
 ---------
-anfComm :: SeqCoreCommand -> UniqSM (Floats, AnfBody)
-anfComm (Let bind comm)
-  = do { new_binds <- anfBind NotTopLevel bind
-       ; (floats, comm') <- anfComm comm
+cpeComm :: SeqCoreCommand -> UniqSM (Floats, CpeBody)
+cpeComm (Let bind comm)
+  = do { new_binds <- cpeBind NotTopLevel bind
+       ; (floats, comm') <- cpeComm comm
        ; return (new_binds `appendFloats` floats, comm') }
-anfComm (Jump args j)
-  = anfJump args j
-anfComm (Eval term frames end)
-  = anfEval term frames end
+cpeComm (Jump args j)
+  = cpeJump args j
+cpeComm (Eval term frames end)
+  = cpeEval term frames end
 
 
 -- ---------------------------------------------------------------------------
---              AnfJoin: produces a result satisfying AnfJoin
+--              CpeJoin: produces a result satisfying CpeJoin
 -- ---------------------------------------------------------------------------
 
-anfJoin :: SeqCoreJoin -> UniqSM AnfJoin
-anfJoin (Join args comm)
-  = do { comm' <- anfCommNF comm
+cpeJoin :: SeqCoreJoin -> UniqSM CpeJoin
+cpeJoin (Join args comm)
+  = do { comm' <- cpeCommNF comm
        ; return (Join args comm') }
 
 -- ---------------------------------------------------------------------------
---              AnfTerm: produces a result satisfying AnfTerm
+--              CpeTerm: produces a result satisfying CpeTerm
 -- ---------------------------------------------------------------------------
 
-anfBodyTermNF :: SeqCoreTerm -> UniqSM AnfTerm
-anfBodyTermNF term
-  = do { (floats, term') <- anfBodyTerm term
+cpeBodyTermNF :: SeqCoreTerm -> UniqSM CpeTerm
+cpeBodyTermNF term
+  = do { (floats, term') <- cpeBodyTerm term
        ; return (wrapBindsAroundBodyTerm floats term') }
 
 --------
-anfBodyTerm :: SeqCoreTerm -> UniqSM (Floats, AnfTerm)
-anfBodyTerm term
-  = do { (floats1, rhs) <- anfRhsE term
+cpeBodyTerm :: SeqCoreTerm -> UniqSM (Floats, CpeTerm)
+cpeBodyTerm term
+  = do { (floats1, rhs) <- cpeRhsE term
        ; (floats2, body) <- rhsToBodyTerm rhs
        ; return (floats1 `appendFloats` floats2, body) }
 
 --------
-rhsToBodyTermNF :: AnfRhs -> UniqSM AnfTerm
+rhsToBodyTermNF :: CpeRhs -> UniqSM CpeTerm
 rhsToBodyTermNF rhs = do { (floats,body) <- rhsToBodyTerm rhs
                      ; return (wrapBindsAroundBodyTerm floats body) }
 
 --------
-rhsToBodyTerm :: AnfRhs -> UniqSM (Floats, AnfTerm)
+rhsToBodyTerm :: CpeRhs -> UniqSM (Floats, CpeTerm)
 rhsToBodyTerm term@(Lam {})
   | all isTyVar bndrs           -- Type lambdas are ok
   = return (emptyFloats, term)
@@ -316,9 +316,9 @@ rhsToBodyTerm term@(Lam {})
 
 rhsToBodyTerm term = return (emptyFloats, term)
 
-anfEval :: SeqCoreTerm -> [SeqCoreFrame] -> SeqCoreEnd
-        -> UniqSM (Floats, AnfBody)
-anfEval term frames end
+cpeEval :: SeqCoreTerm -> [SeqCoreFrame] -> SeqCoreEnd
+        -> UniqSM (Floats, CpeBody)
+cpeEval term frames end
   = do { (floats, term', demands) <- doTerm term termTy
        ; (floats', term'', frames') <- doFrames term' termTy demands floats frames
        ; end' <- doEnd end -- nothing floats from a Return or Case
@@ -342,7 +342,7 @@ anfEval term frames end
               -- Here, we can't evaluate the arg strictly, because this
               -- partial application might be seq'd
     doTerm term ty
-      = do { (floats, term') <- anfArg dmd term ty
+      = do { (floats, term') <- cpeArg dmd term ty
            ; return (floats, term', []) }
       where
         dmd | n_val_args == 0, Return <- end = topDmd
@@ -362,9 +362,9 @@ anfEval term frames end
                 -> do { let (dmd1, dmds') = case demands of
                                               (dmd1:dmds') -> (dmd1, dmds')
                                               []           -> (topDmd, [])
-                            (argTy, resTy) = expectJust "anfEval:doFrames" $
+                            (argTy, resTy) = expectJust "cpeEval:doFrames" $
                                              splitFunTy_maybe ty
-                      ; (floats', arg') <- anfArg dmd1 arg argTy
+                      ; (floats', arg') <- cpeArg dmd1 arg argTy
                       ; let allFloats = floats `appendFloats` floats'
                       ; go (App arg' : acc) term' resTy dmds' allFloats frames' }
               frame@(Cast co) : frames'
@@ -384,12 +384,12 @@ anfEval term frames end
       = return Return
     doEnd (Case bndr alts)
       = do { alts' <- forM alts $ \(Alt con bndrs rhs)
-               -> do { rhs' <- anfCommNF rhs
+               -> do { rhs' <- cpeCommNF rhs
                      ; return (Alt con bndrs rhs') }
            ; return (Case bndr alts') }
 
-anfJump :: [SeqCoreArg] -> JoinId -> UniqSM (Floats, AnfBody)
-anfJump args j
+cpeJump :: [SeqCoreArg] -> JoinId -> UniqSM (Floats, CpeBody)
+cpeJump args j
   = do { (floats, args') <- unzip <$> zipWithM doArg args demands
        ; return (foldr appendFloats emptyFloats floats, Jump args' j) }
   where
@@ -397,17 +397,17 @@ anfJump args j
                 StrictSig (DmdType _ demands _) -> demands ++ repeat topDmd
                   
     
-    doArg arg dmd = anfArg dmd arg (termType arg)
+    doArg arg dmd = cpeArg dmd arg (termType arg)
 
 -- ---------------------------------------------------------------------------
---      AnfArg: produces a result satisfying AnfArg
+--      CpeArg: produces a result satisfying CpeArg
 -- ---------------------------------------------------------------------------
 
 -- This is where we arrange that a non-trivial argument is let-bound
-anfArg :: Demand 
-       -> SeqCoreArg -> Type -> UniqSM (Floats, AnfTriv)
-anfArg dmd arg arg_ty
-  = do { (floats1, arg1) <- anfRhsE arg     -- arg1 can be a lambda
+cpeArg :: Demand 
+       -> SeqCoreArg -> Type -> UniqSM (Floats, CpeTriv)
+cpeArg dmd arg arg_ty
+  = do { (floats1, arg1) <- cpeRhsE arg     -- arg1 can be a lambda
        ; (floats2, arg2) <- if want_float floats1 arg1
                             then return (floats1, arg1)
                             else do { body1 <- rhsToBodyTermNF arg1
@@ -452,12 +452,12 @@ We pin demand info on floated lets so that we can see the one-shot thunks.
 -}
 
 data FloatingBind
-  = FloatLet SeqCoreBind    -- Rhs of bindings are AnfRhss
+  = FloatLet SeqCoreBind    -- Rhs of bindings are CpeRhss
                             -- They are always of lifted type;
                             -- unlifted ones are done with FloatCase
                             -- No joins! These go in FloatingJoinBind
  | FloatCase
-      Id AnfBody
+      Id CpeBody
       Bool              -- The bool indicates "ok-for-speculation"
 
 newtype FloatingJoinBind
@@ -496,7 +496,7 @@ data OkToSpec
                         -- ok-to-speculate unlifted bindings
    | NotOkToSpec        -- Some not-ok-to-speculate unlifted bindings
 
-mkFloat :: Demand -> Bool -> AnfBindPair -> Floats
+mkFloat :: Demand -> Bool -> CpeBindPair -> Floats
 mkFloat dmd is_unlifted (BindTerm bndr rhs)
   | use_case  = unitFloat $ FloatCase bndr (Eval rhs [] Return) (termOkForSpeculation rhs)
   | is_hnf    = unitFloat $ FloatLet (NonRec (BindTerm bndr                       rhs))
@@ -518,7 +518,7 @@ emptyFloats = Floats OkToSpec nilOL nilOL
 isEmptyFloats :: Floats -> Bool
 isEmptyFloats (Floats _ bs js) = isNilOL bs && isNilOL js
 
-wrapBinds :: Floats -> AnfBody -> AnfBody
+wrapBinds :: Floats -> CpeBody -> CpeBody
 wrapBinds floats@(Floats _ binds _) body
   = foldrOL mk_bind (wrapJoinBinds floats body) binds
   where
@@ -526,13 +526,13 @@ wrapBinds floats@(Floats _ binds _) body
                                                Case bndr [Alt DEFAULT [] body]
     mk_bind (FloatLet bind)        body = Let bind body
 
-wrapJoinBinds :: Floats -> AnfBody -> AnfBody
+wrapJoinBinds :: Floats -> CpeBody -> CpeBody
 wrapJoinBinds (Floats _ _ joins) body
   = foldrOL mk_join_bind body joins
   where
     mk_join_bind (FloatLetJoin bind) body = Let bind body
 
-wrapBindsAroundBodyTerm :: Floats -> AnfTerm -> AnfTerm
+wrapBindsAroundBodyTerm :: Floats -> CpeTerm -> CpeTerm
 wrapBindsAroundBodyTerm floats rhs | isEmptyFloats floats = rhs
 wrapBindsAroundBodyTerm floats (Compute ty rhs) = Compute ty (wrapBinds floats rhs)
 wrapBindsAroundBodyTerm floats rhs = Compute (termType rhs) $
@@ -583,12 +583,12 @@ deFloatTop :: Floats -> [SeqCoreBind]
 -- For top level only; we don't expect any FloatCases or BindJoins
 deFloatTop (Floats _ floats joins)
   | not (isNilOL joins)
-  = panic "anfProgram" (vcat (map ppr (fromOL joins)))
+  = panic "cpeProgram" (vcat (map ppr (fromOL joins)))
   | otherwise
   = foldrOL get [] floats
   where
     get (FloatLet b) bs = process b : bs
-    get b            _  = pprPanic "anfProgram" (ppr b)
+    get b            _  = pprPanic "cpeProgram" (ppr b)
 
     -- See Note [Dead code in CorePrep]
     -- Zap demand info; it makes no sense at top level, and CoreLint complains
@@ -599,13 +599,13 @@ deFloatTop (Floats _ floats joins)
       = Rec [ BindTerm (zapDemandIdInfo x) (occurAnalyseTerm_NoBinderSwap e)
             | BindTerm x e <- xes ]
     process b
-      = pprPanic "anfProgram" (ppr b)
+      = pprPanic "cpeProgram" (ppr b)
 
 ---------------------------------------------------------------------------
 -- N.B. Here in CorePrep is a whole mess of stuff about CAFs, but happily we
 -- don't need to worry about making CafInfo correct so we don't bother.
 
-wantFloatNested :: RecFlag -> Bool -> Floats -> AnfRhs -> Bool
+wantFloatNested :: RecFlag -> Bool -> Floats -> CpeRhs -> Bool
 wantFloatNested is_rec strict_or_unlifted floats rhs
   =  isEmptyFloats floats
   || strict_or_unlifted

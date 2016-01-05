@@ -541,7 +541,7 @@ prepareRhsTerm env level x (Compute ty comm)
         -- Note [Float coercions] in GHC Simplify.lhs).
         -- 
         -- Whether or not we do the split, the arguments in the ellipses will
-        -- get ANF'd if we learn that this is an expandable application (a PAP
+        -- get let-bound if we learn that this is an expandable application (a PAP
         -- or application of a constructor or CONLIKE function).
         --
         -- The protocol: go nValArgs kont takes the number of value args seen
@@ -1944,16 +1944,16 @@ ensureDupableKont env dsc csc
   = return (emptyFloats, csc)
 
 -- | Make a continuation into something we're okay with duplicating into each
--- branch of a case (and each branch of those branches, ...), possibly
--- generating a number of bound terms and join points in the process.
+-- branch of a case (and each branch of those branches, ...). This may generate
+-- a number of bound terms and join points.
 --
 -- The rules:
 --   1. Duplicate returns.
 --   2. Duplicate casts.
 --   3. Don't duplicate ticks (because GHC doesn't).
---   4. Duplicate applications, but ANF-ize them first to share the arguments.
+--   4. Duplicate applications, but let-bind them first to share the arguments.
 --   5. Don't duplicate single-branch cases.
---   6. Duplicate cases, but "ANF-ize" in a dual sense by creating a join point
+--   6. Duplicate cases, but "let-bind" in a dual sense by creating a join point
 --        for each branch.
 
 mkDupableKont :: SimplEnv -> DataScope -> ControlScope

@@ -28,7 +28,6 @@ flag examples
 library
   hs-source-dirs:      src
   exposed-modules:     Language.SequentCore
-                       Language.SequentCore.ANF
                        Language.SequentCore.Annot
                        Language.SequentCore.Arity
                        Language.SequentCore.Dump
@@ -39,6 +38,7 @@ library
                        Language.SequentCore.Lint
                        Language.SequentCore.OccurAnal
                        Language.SequentCore.Plugin
+                       Language.SequentCore.PrePrep
                        Language.SequentCore.Pretty
                        Language.SequentCore.Simpl
                        Language.SequentCore.SpecConstr
