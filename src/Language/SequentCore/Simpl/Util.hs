@@ -2,7 +2,7 @@
 
 module Language.SequentCore.Simpl.Util (
   -- * Flags
-  linting, dumping, tracing, traceTicks,
+  tracing, traceTicks,
 
   -- * State of argument processing
   RevList, ArgInfo(..), Target(..),
@@ -57,12 +57,10 @@ import Control.Monad
 -----------
 
 -- TODO Use proper command-line stuff.
-tracing, traceTicks, dumping, linting :: Bool
+tracing, traceTicks :: Bool
 
 tracing    = False
 traceTicks = False
-dumping    = False
-linting    = True
 
 -------------
 -- ArgInfo --

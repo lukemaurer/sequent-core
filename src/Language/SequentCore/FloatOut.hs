@@ -16,11 +16,11 @@
 -- for details
 {-# LANGUAGE CPP #-}
 
-module Language.SequentCore.FloatOut ( floatOutwards, plugin ) where
+module Language.SequentCore.FloatOut ( runFloatOut, floatOutwards, plugin ) where
 
 import Language.SequentCore.Arity
-import Language.SequentCore.FloatOut.Flags hiding ( FloatGeneralFlag(..) )
-import qualified Language.SequentCore.FloatOut.Flags as FloatFlags
+import Language.SequentCore.Driver.Flags hiding ( SeqGeneralFlag(..) )
+import qualified Language.SequentCore.Driver.Flags as SeqFlags
 import Language.SequentCore.FloatOut.SetLevels
 import Language.SequentCore.Lint
 import Language.SequentCore.Plugin
@@ -34,7 +34,6 @@ import CoreMonad        ( FloatOutSwitches(..), SimplifierMode(..)
                         , defaultPlugin, reinitializeGlobals
                         , runMaybe, runWhen )
 import DynFlags
-import HscTypes         ( ModGuts(..) )
 import ErrUtils         ( dumpIfSet_dyn, errorMsg )
 import Id               ( Id, idArity, isBottomingId, zapDemandIdInfo )
 import Var              ( Var )
@@ -62,7 +61,7 @@ plugin = defaultPlugin {
     reinitializeGlobals
     let cmdLine' = concatMap words cmdLine
           -- Allow -fplugin-opt=plugin:"opt1 opt2"
-    (fflags, leftovers, warns) <- parseFloatFlags cmdLine'
+    (sflags, leftovers, warns) <- parseSeqFlags cmdLine'
     dflags <- getDynFlags
     unless (null leftovers) $
       liftIO $ errorMsg dflags $
@@ -70,10 +69,10 @@ plugin = defaultPlugin {
         vcat (map text leftovers)
     unless (null warns) $
       liftIO $ errorMsg dflags $ vcat (map text warns)
-    let todos' = replace dflags fflags todos
+    let todos' = replace dflags sflags todos
     return todos'
 } where
-  replace dflags fflags = go True
+  replace dflags sflags = go True
     where
       go top (CoreDoFloatOutwards switches : todos)
         = normalPass switches : go top todos
@@ -82,43 +81,43 @@ plugin = defaultPlugin {
       go top (todo : todos)
         = todo : go top todos
       go top []
-        | top, fgopt FloatFlags.Opt_LLF fflags
+        | top, sgopt SeqFlags.Opt_LLF sflags
         = [finalPass, simplAfterFinalPass]
         | otherwise
         = []
 
       normalPass switches
         = CoreDoPluginPass "Float out (Sequent Core)"
-                           (runFloatOut switches fflags Nothing)
+                           (sequentPass $ runFloatOut switches sflags Nothing)
 
       finalPass
         = CoreDoPluginPass "Late lambda-lifting (Sequent Core)"
-                           (runFloatOut switchesForFinal fflags
-                                        (Just finalPassSwitches) )
+                           (sequentPass $ runFloatOut switchesForFinal sflags
+                                                      (Just finalPassSwitches))
 
       simplAfterFinalPass
-        = runWhen (fgopt FloatFlags.Opt_LLF_Simpl fflags) $
+        = runWhen (sgopt SeqFlags.Opt_LLF_Simpl sflags) $
             simpl_phase 0 ["post-late-lam-lift"] max_iter
 
       switchesForFinal = FloatOutSwitches
-        { floatOutLambdas             = FloatFlags.lateFloatNonRecLam fflags
+        { floatOutLambdas             = SeqFlags.lateFloatNonRecLam sflags
         , floatOutConstants           = False
         , floatOutPartialApplications = False
         }
 
       finalPassSwitches = FinalPassSwitches
-        { fps_trace          = doptDumpLateFloat                     fflags
-        , fps_stabilizeFirst = fgopt FloatFlags.Opt_LLF_Stabilize    fflags
-        , fps_rec            = FloatFlags.lateFloatRecLam            fflags
-        , fps_absUnsatVar    = fgopt FloatFlags.Opt_LLF_AbsUnsat     fflags
-        , fps_absSatVar      = fgopt FloatFlags.Opt_LLF_AbsSat       fflags
-        , fps_absOversatVar  = fgopt FloatFlags.Opt_LLF_AbsOversat   fflags
-        , fps_createPAPs     = fgopt FloatFlags.Opt_LLF_CreatePAPs   fflags
-        , fps_ifInClo        = FloatFlags.lateFloatIfInClo           fflags
-        , fps_cloGrowth      = FloatFlags.lateFloatCloGrowth         fflags
-        , fps_cloGrowthInLam = FloatFlags.lateFloatCloGrowthInLam    fflags
-        , fps_strictness     = fgopt FloatFlags.Opt_LLF_UseStr       fflags
-        , fps_oneShot        = fgopt FloatFlags.Opt_LLF_OneShot      fflags
+        { fps_trace          = sdopt SeqFlags.Opt_D_dump_llf       sflags
+        , fps_stabilizeFirst = sgopt SeqFlags.Opt_LLF_Stabilize    sflags
+        , fps_rec            = SeqFlags.lateFloatRecLam            sflags
+        , fps_absUnsatVar    = sgopt SeqFlags.Opt_LLF_AbsUnsat     sflags
+        , fps_absSatVar      = sgopt SeqFlags.Opt_LLF_AbsSat       sflags
+        , fps_absOversatVar  = sgopt SeqFlags.Opt_LLF_AbsOversat   sflags
+        , fps_createPAPs     = sgopt SeqFlags.Opt_LLF_CreatePAPs   sflags
+        , fps_ifInClo        = SeqFlags.lateFloatIfInClo           sflags
+        , fps_cloGrowth      = SeqFlags.lateFloatCloGrowth         sflags
+        , fps_cloGrowthInLam = SeqFlags.lateFloatCloGrowthInLam    sflags
+        , fps_strictness     = sgopt SeqFlags.Opt_LLF_UseStr       sflags
+        , fps_oneShot        = sgopt SeqFlags.Opt_LLF_OneShot      sflags
         }
         
       max_iter      = maxSimplIterations dflags
@@ -167,14 +166,14 @@ plugin = defaultPlugin {
                             -- Don't do case-of-case transformations.
                             -- This makes full laziness work better
 
-runFloatOut :: FloatOutSwitches -> FloatFlags -> Maybe FinalPassSwitches
-            -> ModGuts
-            -> CoreM ModGuts
-runFloatOut switches fflags final guts
+runFloatOut :: FloatOutSwitches -> SeqFlags -> Maybe FinalPassSwitches
+            -> SeqCoreProgram
+            -> CoreM SeqCoreProgram
+runFloatOut switches sflags final binds
   = do
     dflags <- getDynFlags
     us <- getUniqueSupplyM
-    sequentPass (liftIO . floatOutwards switches final dflags fflags us) guts
+    liftIO $ floatOutwards switches final dflags sflags us binds
 
 {-
         -----------------
@@ -260,13 +259,13 @@ Well, maybe.  We don't do this at the moment.
 floatOutwards :: FloatOutSwitches
               -> Maybe FinalPassSwitches
               -> DynFlags
-              -> FloatFlags
+              -> SeqFlags
               -> UniqSupply
               -> SeqCoreProgram -> IO SeqCoreProgram
 
-floatOutwards float_sws fps dflags fflags us pgm
+floatOutwards float_sws fps dflags sflags us pgm
   = do {
-        let { annotated_w_levels = setLevels dflags fflags float_sws fps pgm us ;
+        let { annotated_w_levels = setLevels dflags sflags float_sws fps pgm us ;
               (fss, binds_s')    = unzip (map floatTopBind annotated_w_levels)
             } ;
 

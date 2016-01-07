@@ -79,7 +79,7 @@ functions for specialize.
 -}
 
 module Language.SequentCore.SpecConstr (
-  plugin
+  plugin, runSpecConstr
 ) where
 
 import Language.SequentCore.Plugin
@@ -142,6 +142,10 @@ plugin = defaultPlugin {
     = Nothing
 
   specConstrPass = CoreDoPluginPass "SeqSpecConstr" (sequentPass specModule)
+
+-- | Main entry point for programmatic invocation (by the driver, for instance)
+runSpecConstr :: SeqCoreProgram -> CoreM SeqCoreProgram
+runSpecConstr = specModule
 
 data ScEnv
   = SCE { sc_size       :: Maybe Int

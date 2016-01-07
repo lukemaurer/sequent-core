@@ -45,8 +45,10 @@ library
                        Language.SequentCore.Syntax
                        Language.SequentCore.Syntax.Util
                        Language.SequentCore.Translate
+                       SequentCore
   other-modules:       Language.SequentCore.Simpl.Env
-                       Language.SequentCore.FloatOut.Flags
+                       Language.SequentCore.Driver
+                       Language.SequentCore.Driver.Flags
                        Language.SequentCore.FloatOut.SetLevels
                        Language.SequentCore.FloatOut.Summary
                        Language.SequentCore.Simpl.ExprSize
@@ -73,7 +75,8 @@ executable SpecConstrExpl
   Main-is:             SpecConstrExpl.hs
   build-depends:       base >= 4 && < 5, sequent-core, containers
   default-language:    Haskell2010
-  ghc-options:         -fplugin=Language.SequentCore.SpecConstr
+  ghc-options:         -fplugin=SequentCore
+                       -fplugin-opt=SequentCore:-fseq-spec-constr
                        -fspec-constr
   if !flag(examples)
     buildable:         False
@@ -83,7 +86,8 @@ executable SimplExpl
   Main-is:             Compl.hs
   build-depends:       base >= 4 && < 5, sequent-core, bytestring
   default-language:    Haskell2010
-  ghc-options:         -fplugin=Language.SequentCore.Simpl
+  ghc-options:         -fplugin=SequentCore
+                       -fplugin-opt=SequentCore:-fseq-simpl
   if !flag(examples)
     buildable:         False
 
@@ -92,7 +96,8 @@ executable CasesExpl
   Main-is:             Cases.hs
   build-depends:       base >= 4 && < 5, sequent-core
   default-language:    Haskell2010
-  ghc-options:         -fplugin=Language.SequentCore.Simpl
+  ghc-options:         -fplugin=SequentCore
+                       -fplugin-opt=SequentCore:-fseq-simpl
   if !flag(examples)
     buildable:         False
 
@@ -120,7 +125,8 @@ executable StrictnessExpl
   Main-is:             Strictness.hs
   build-depends:       base >= 4 && < 5, sequent-core
   default-language:    Haskell2010
-  ghc-options:         -O -fplugin=Language.SequentCore.Simpl
+  ghc-options:         -O -fplugin=SequentCore
+                       -fplugin-opt=SequentCore:-fseq-simpl
                        -fplugin=Language.SequentCore.Dump
                        -fplugin-opt=Language.SequentCore.Dump:end
   if !flag(examples)

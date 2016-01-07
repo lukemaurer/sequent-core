@@ -61,7 +61,7 @@ module Language.SequentCore.FloatOut.SetLevels (
         incMinorLvl, ltMajLvl, ltLvl, isTopLvl
     ) where
 
-import Language.SequentCore.FloatOut.Flags as FloatFlags
+import Language.SequentCore.Driver.Flags as SeqFlags
 import Language.SequentCore.FloatOut.Summary
 import Language.SequentCore.FVs
 import Language.SequentCore.PrePrep
@@ -246,18 +246,18 @@ instance Eq Level where
 -}
 
 setLevels :: DynFlags
-          -> FloatFlags
+          -> SeqFlags
           -> FloatOutSwitches
           -> Maybe FinalPassSwitches
           -> SeqCoreProgram
           -> UniqSupply
           -> [Levelled Bind]
-setLevels dflags fflags float_lams fps binds us
+setLevels dflags sflags float_lams fps binds us
   = initLvl us2 (do_them init_env summarized_binds)
   where
-    init_env = initialEnv dflags fflags float_lams fps
+    init_env = initialEnv dflags sflags float_lams fps
 
-    prepped_binds | is_final_pass = prepareForFinalPass dflags fflags us1 binds
+    prepped_binds | is_final_pass = prepareForFinalPass dflags sflags us1 binds
                   | otherwise     = binds
 
     is_final_pass = isJust fps
@@ -291,13 +291,13 @@ lvlTopBind _ bind
                            ppr (deAnnotateBind bind))
 
 -- Prepare for late lambda-lift pass. See Note [LLL prep]
-prepareForFinalPass :: DynFlags -> FloatFlags -> UniqSupply
+prepareForFinalPass :: DynFlags -> SeqFlags -> UniqSupply
                     -> SeqCoreProgram
                     -> SeqCoreProgram
-prepareForFinalPass dflags fflags us binds
+prepareForFinalPass dflags sflags us binds
   = binds_final
   where
-    binds1 | fgopt FloatFlags.Opt_LLF_Stabilize fflags
+    binds1 | sgopt SeqFlags.Opt_LLF_Stabilize sflags
            = stabilizeExposedUnfoldings dflags binds
            | otherwise = binds
     
@@ -995,7 +995,7 @@ lvlBind env ty bind@(_, AnnNonRec pair)
           -- We can't float an unlifted binding to top level, so we don't 
           -- float it at all.  It's a bit brutal, but unlifted bindings 
           -- aren't expensive either
-  , isTopLvl dest_lvl || is_term || (is_nullary_join && fgopt Opt_FloatNullaryJoins (le_fflags env))
+  , isTopLvl dest_lvl || is_term || (is_nullary_join && sgopt Opt_FloatNullaryJoins (le_sflags env))
           -- Never float a non-nullary join point except to top level
           -- Note [Floating joins]
   = do_float dest_lvl abs_vars
@@ -1044,7 +1044,7 @@ lvlBind env ty bind@(_, AnnRec pairs)
   where
     bndrs = map binderOfAnnPair pairs
     binds_unfloatable_join (_, AnnBindJoin _ (_, AnnJoin xs _))
-      = not (fgopt Opt_FloatNullaryJoins (le_fflags env) && null xs)
+      = not (sgopt Opt_FloatNullaryJoins (le_sflags env) && null xs)
     binds_unfloatable_join _
       = False
 
@@ -1503,7 +1503,7 @@ data LevelEnv
                                          -- These are being floated to top level
                                          -- and hence decontified
        , le_dflags    :: DynFlags
-       , le_fflags    :: FloatFlags
+       , le_sflags    :: SeqFlags
     }
         -- We clone let- and case-bound variables so that they are still
         -- distinct when floated out; hence the le_subst/le_env.
@@ -1526,10 +1526,10 @@ data LevelEnv
         --
         -- The domain of the le_lvl_env is the *post-cloned* Ids
 
-initialEnv :: DynFlags -> FloatFlags
+initialEnv :: DynFlags -> SeqFlags
            -> FloatOutSwitches -> Maybe FinalPassSwitches
            -> LevelEnv
-initialEnv dflags fflags float_lams fps
+initialEnv dflags sflags float_lams fps
   = LE { le_switches = float_lams
        , le_finalPass = fps
        , le_ctxt_lvl = tOP_LEVEL
@@ -1538,7 +1538,7 @@ initialEnv dflags fflags float_lams fps
        , le_env = emptyVarEnv
        , le_decont = emptyVarSet
        , le_dflags = dflags
-       , le_fflags = fflags }
+       , le_sflags = sflags }
 
 isFinalPass :: LevelEnv -> Bool
 isFinalPass env = isJust (le_finalPass env)

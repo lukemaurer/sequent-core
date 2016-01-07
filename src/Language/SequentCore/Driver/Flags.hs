@@ -1,7 +1,10 @@
-module Language.SequentCore.FloatOut.Flags (
-  FloatFlags(..), FloatGeneralFlag(..), fgopt, FinalPassSwitches(..),
+module Language.SequentCore.Driver.Flags (
+  SeqFlags(..), SeqDumpFlag(..), SeqGeneralFlag(..), FinalPassSwitches(..),
   
-  parseFloatFlags
+  sgopt, sgopt_set, sgopt_unset,
+  sdopt, sdopt_set, sdopt_unset,
+  
+  parseSeqFlags
 ) where
 
 import CmdLineParser
@@ -13,19 +16,31 @@ import Control.Monad
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 
-parseFloatFlags :: MonadIO m => [String]
-                -> m (FloatFlags, [String], [String])
-parseFloatFlags args = do
-  let ((leftover, errs, warns), fflags)
-          = runCmdLine (processArgs floatFlags (map noLoc args))
-                       defaultFloatFlags
-  when (not (null errs)) $ liftIO $
+parseSeqFlags :: MonadIO m => [String]
+              -> m (SeqFlags, [String], [String])
+parseSeqFlags args = do
+  let ((leftover, errs, warns), sflags)
+          = runCmdLine (processArgs seqFlags (map noLoc args))
+                       defaultSeqFlags
+  unless (null errs) $ liftIO $
       throwGhcExceptionIO $ errorsToGhcException errs
 
-  return (fflags, map unLoc leftover, map unLoc warns)
+  return (sflags, map unLoc leftover, map unLoc warns)
 
-data FloatGeneralFlag
-  = Opt_ProtectLastValArg
+data SeqDumpFlag
+  = Opt_D_dump_llf
+  | Opt_D_dump_seq_xlate
+  deriving (Eq, Ord, Enum)
+
+data SeqGeneralFlag
+  = Opt_EnableSeqSimpl      -- ^ Use Sequent Core simplifier (Language.SequentCore.Simpl)
+  | Opt_EnableSeqFloatOut   -- ^ Use Sequent Core implementation of Float Out (Language.SequentCore.FloatOut)
+  | Opt_EnableSeqSpecConstr -- ^ Use Sequent Core implementation of SpecConstr (Language.SequentCore.SpecConstr)
+  
+  | Opt_CombineSeqPasses    -- ^ Avoid churning between Core and Sequent Core
+                            -- TODO Contify more often so that there is nothing to gain by going back and forth
+  
+  | Opt_ProtectLastValArg
   | Opt_IgnoreRealWorld
   | Opt_FloatNullaryJoins   -- ^ Always allowed to float a nullary join point
 
@@ -40,9 +55,9 @@ data FloatGeneralFlag
   | Opt_LLF_OneShot
   deriving (Eq, Ord, Enum)
 
-data FloatFlags = FloatFlags {
-  doptDumpLateFloat       :: Bool,
-  floatGeneralFlags       :: IntSet,
+data SeqFlags = SeqFlags {
+  seqDumpFlags            :: IntSet,
+  seqGeneralFlags         :: IntSet,
   lateFloatNonRecLam      :: Maybe Int,   -- ^ Limit on # abstracted variables for *late* non-recursive function floating (Nothing => all, Just 0 => none)
   lateFloatRecLam         :: Maybe Int,   -- ^   "    " "     "          "     for *late*     recursive function floating
   lateFloatIfInClo        :: Maybe Int,   -- ^ Limit on # abstracted variables for floating a binding that occurs in a closure
@@ -50,11 +65,11 @@ data FloatFlags = FloatFlags {
   lateFloatCloGrowthInLam :: Maybe Int
 }
 
-defaultFloatFlags :: FloatFlags
-defaultFloatFlags =
-  FloatFlags {
-    doptDumpLateFloat       = False,
-    floatGeneralFlags       = IntSet.fromList (map fromEnum defaultGeneralFlags),
+defaultSeqFlags :: SeqFlags
+defaultSeqFlags =
+  SeqFlags {
+    seqDumpFlags            = IntSet.empty,
+    seqGeneralFlags         = IntSet.fromList (map fromEnum defaultGeneralFlags),
     lateFloatNonRecLam      = Just 10,
     lateFloatRecLam         = Just 6,
     lateFloatIfInClo        = Nothing,
@@ -62,25 +77,39 @@ defaultFloatFlags =
     lateFloatCloGrowthInLam = Just 0
   }
 
-defaultGeneralFlags :: [FloatGeneralFlag]
+defaultGeneralFlags :: [SeqGeneralFlag]
 defaultGeneralFlags = [ Opt_LLF_AbsUnsat, Opt_LLF_UseStr, Opt_LLF_OneShot,
                         Opt_LLF_Simpl, Opt_LLF_Stabilize ]
 
--- | Test whether a 'FloatGeneralFlag' is set
-fgopt :: FloatGeneralFlag -> FloatFlags -> Bool
-fgopt f fflags  = fromEnum f `IntSet.member` floatGeneralFlags fflags
+-- | Test whether a 'SeqGeneralFlag' is set
+sgopt :: SeqGeneralFlag -> SeqFlags -> Bool
+sgopt f sflags  = fromEnum f `IntSet.member` seqGeneralFlags sflags
 
--- | Set a 'FloatGeneralFlag'
-fgopt_set :: FloatFlags -> FloatGeneralFlag -> FloatFlags
-fgopt_set ffs f = ffs{ floatGeneralFlags = IntSet.insert (fromEnum f) (floatGeneralFlags ffs) }
+-- | Set a 'SeqGeneralFlag'
+sgopt_set :: SeqFlags -> SeqGeneralFlag -> SeqFlags
+sgopt_set sfs f = sfs{ seqGeneralFlags = IntSet.insert (fromEnum f) (seqGeneralFlags sfs) }
 
--- | Unset a 'FloatGeneralFlag'
-fgopt_unset :: FloatFlags -> FloatGeneralFlag -> FloatFlags
-fgopt_unset ffs f = ffs{ floatGeneralFlags = IntSet.delete (fromEnum f) (floatGeneralFlags ffs) }
+-- | Unset a 'SeqGeneralFlag'
+sgopt_unset :: SeqFlags -> SeqGeneralFlag -> SeqFlags
+sgopt_unset sfs f = sfs{ seqGeneralFlags = IntSet.delete (fromEnum f) (seqGeneralFlags sfs) }
 
-floatFlags :: [Flag (CmdLineP FloatFlags)]
-floatFlags = [
-    Flag "ddump-llf"                     (noArg       (\f -> f{ doptDumpLateFloat = True }))
+-- | Test whether a 'SeqDumpFlag' is set
+sdopt :: SeqDumpFlag -> SeqFlags -> Bool
+sdopt f sflags = fromEnum f `IntSet.member` seqDumpFlags sflags
+
+-- | Set a 'SeqDumpFlag'
+sdopt_set :: SeqFlags -> SeqDumpFlag -> SeqFlags
+sdopt_set sfs f = sfs{ seqDumpFlags = IntSet.insert (fromEnum f) (seqDumpFlags sfs) }
+
+-- | Unset a 'SeqDumpFlag'
+sdopt_unset :: SeqFlags -> SeqDumpFlag -> SeqFlags
+sdopt_unset sfs f = sfs{ seqDumpFlags = IntSet.delete (fromEnum f) (seqDumpFlags sfs) }
+
+seqFlags :: [Flag (CmdLineP SeqFlags)]
+seqFlags = [
+    Flag "ddump-llf"                     (setDumpFlag Opt_D_dump_llf)
+  , Flag "ddump-seq-xlate"               (setDumpFlag Opt_D_dump_seq_xlate)
+                  
   , Flag "fllf-nonrec-lam-limit"         (intSuffix (\n f -> f{ lateFloatNonRecLam = Just n }))
   , Flag "fllf-nonrec-lam-any"           (noArg       (\f -> f{ lateFloatNonRecLam = Nothing }))
   , Flag "fno-llf-nonrec-lam"            (noArg       (\f -> f{ lateFloatNonRecLam = Just 0 }))
@@ -97,8 +126,8 @@ floatFlags = [
   , Flag "fllf-clo-growth-in-lam-any"    (noArg       (\f -> f{ lateFloatCloGrowthInLam = Nothing }))
   , Flag "fno-llf-clo-growth-in-lam"     (noArg       (\f -> f{ lateFloatCloGrowthInLam = Just 0 }))
  ]
- ++ map (mkFlag turnOn  "f"    setGeneralFlag  ) fFlags
- ++ map (mkFlag turnOff "fno-" unSetGeneralFlag) fFlags
+ ++ map (mkFlag turnOn  "f"    setGeneralFlag  ) sFlags
+ ++ map (mkFlag turnOff "fno-" unSetGeneralFlag) sFlags
 
 type TurnOnFlag = Bool   -- True  <=> we are turning the flag on
                         -- False <=> we are turning the flag off
@@ -115,15 +144,21 @@ mkFlag :: TurnOnFlag            -- ^ True <=> it should be turned on
       -> String                -- ^ The flag prefix
       -> (flag -> DynP ())     -- ^ What to do when the flag is found
       -> FlagSpec flag         -- ^ Specification of this particular flag
-      -> Flag (CmdLineP FloatFlags)
+      -> Flag (CmdLineP SeqFlags)
 mkFlag turn_on flagPrefix f (name, flag, extra_action)
    = Flag (flagPrefix ++ name) (NoArg (f flag >> extra_action turn_on))
 
 nop :: TurnOnFlag -> DynP ()
 nop _ = return ()
 
-fFlags :: [FlagSpec FloatGeneralFlag]
-fFlags = [
+sFlags :: [FlagSpec SeqGeneralFlag]
+sFlags = [
+  ( "seq-simpl",                 Opt_EnableSeqSimpl, nop),
+  ( "seq-full-laziness",         Opt_EnableSeqFloatOut, nop),
+  ( "seq-spec-constr",           Opt_EnableSeqSpecConstr, nop),
+  
+  ( "seq-combine-passes",        Opt_CombineSeqPasses, nop),
+  
   ( "llf",                       Opt_LLF, nop),
   ( "llf-abstract-undersat",     Opt_LLF_AbsUnsat, nop),
   ( "llf-abstract-sat",          Opt_LLF_AbsSat, nop),
@@ -136,27 +171,33 @@ fFlags = [
   ( "float-nullary-joins",       Opt_FloatNullaryJoins, nop)
  ]
 
-type DynP = EwM (CmdLineP FloatFlags)
+type DynP = EwM (CmdLineP SeqFlags)
 
-noArg :: (FloatFlags -> FloatFlags) -> OptKind (CmdLineP FloatFlags)
+noArg :: (SeqFlags -> SeqFlags) -> OptKind (CmdLineP SeqFlags)
 noArg fn = NoArg (upd fn)
 
-intSuffix :: (Int -> FloatFlags -> FloatFlags) -> OptKind (CmdLineP FloatFlags)
+intSuffix :: (Int -> SeqFlags -> SeqFlags) -> OptKind (CmdLineP SeqFlags)
 intSuffix fn = IntSuffix (\n -> upd (fn n))
 
-upd :: (FloatFlags -> FloatFlags) -> DynP ()
+upd :: (SeqFlags -> SeqFlags) -> DynP ()
 upd f = liftEwM (do dflags <- getCmdLineState
                     putCmdLineState $! f dflags)
 
+setDumpFlag :: SeqDumpFlag -> OptKind (CmdLineP SeqFlags)
+setDumpFlag dump_flag = NoArg (setDumpFlag' dump_flag)
+
 --------------------------
-setGeneralFlag, unSetGeneralFlag :: FloatGeneralFlag -> DynP ()
+setGeneralFlag, unSetGeneralFlag :: SeqGeneralFlag -> DynP ()
 setGeneralFlag   f = upd (setGeneralFlag' f)
 unSetGeneralFlag f = upd (unSetGeneralFlag' f)
 
-setGeneralFlag' :: FloatGeneralFlag -> FloatFlags -> FloatFlags
-setGeneralFlag' f dflags = fgopt_set dflags f
-unSetGeneralFlag' :: FloatGeneralFlag -> FloatFlags -> FloatFlags
-unSetGeneralFlag' f dflags = fgopt_unset dflags f
+setGeneralFlag' :: SeqGeneralFlag -> SeqFlags -> SeqFlags
+setGeneralFlag' f dflags = sgopt_set dflags f
+unSetGeneralFlag' :: SeqGeneralFlag -> SeqFlags -> SeqFlags
+unSetGeneralFlag' f dflags = sgopt_unset dflags f
+
+setDumpFlag' :: SeqDumpFlag -> DynP ()
+setDumpFlag' dump_flag = upd (\dfs -> sdopt_set dfs dump_flag)
 
 --------------------------
 data FinalPassSwitches = FinalPassSwitches

@@ -11,7 +11,7 @@
 -- easier to use Sequent Core for these, as the continuations are expressed
 -- directly in the program syntax rather than needing to be built up on the fly.
 
-module Language.SequentCore.Simpl (plugin) where
+module Language.SequentCore.Simpl (runSimplifier) where
 
 import Language.SequentCore.Arity
 import Language.SequentCore.Lint
@@ -28,8 +28,7 @@ import Language.SequentCore.WiredIn
 
 import BasicTypes
 import Coercion    ( coercionKind, isCoVar, mkCoCast, mkSymCo, mkTransCo )
-import CoreMonad   ( Plugin(..), SimplifierMode(..), Tick(..), CoreToDo(..),
-                     CoreM, defaultPlugin, reinitializeGlobals,
+import CoreMonad   ( SimplifierMode(..), Tick(..), CoreM,
                      isZeroSimplCount, pprSimplCount, simplCountN,
                      putMsg,
                      getHscEnv, getRuleBase
@@ -45,7 +44,7 @@ import DynFlags    ( DynFlags, DumpFlag(..), GeneralFlag(..)
                    , gopt, dopt
                    , printInfoForUser
                    , ufKeenessFactor, ufUseThreshold )
-import ErrUtils    ( dumpSDoc )
+import ErrUtils    ( debugTraceMsg, dumpSDoc )
 import FamInstEnv
 import FastString
 import Id
@@ -60,7 +59,6 @@ import MonadUtils
 import Name        ( isExternalName, mkSystemVarName )
 import Outputable
 import Pair
-import qualified PprCore as Core
 import Rules       ( extendRuleBaseList, lookupRule, unionRuleBase )
 import Type hiding ( extendTvSubst, substTy, substTyVar )
 import TysWiredIn  ( mkTupleTy )
@@ -76,74 +74,19 @@ import Control.Monad       ( when )
 import Data.List           ( mapAccumL )
 import Data.Maybe          ( catMaybes, isJust, mapMaybe )
 
--- | Plugin data. The initializer replaces all instances of the original
--- simplifier with the new one.
-plugin :: Plugin
-plugin = defaultPlugin {
-  installCoreToDos = \_ todos -> do
-    reinitializeGlobals
-    let todos' = replace todos
-    return todos'
-} where
-  replace (CoreDoSimplify max mode : todos)
-    = newPass max mode : replace todos
-  replace (CoreDoPasses todos1 : todos2)
-    = CoreDoPasses (replace todos1) : replace todos2
-  replace (todo : todos)
-    = todo : replace todos
-  replace []
-    = []
-
-  -- Useful for tracing: Use built-in simplifier until after strictness
-  {-
-  replace = snd . go False
-    where
-      go True (CoreDoSimplify max mode : todos)
-        = let (b', todos') = go True todos
-              in (b', newPass max mode : todos')
-      go _ (CoreDoStrictness : todos)
-        = let (b', todos') = go True todos
-          in (b', CoreDoStrictness : todos')
-      go b (CoreDoPasses todos1 : todos2)
-        = let (b', todos1') = go b todos1
-              (b'', todos2') = go b' todos2
-          in (b'', CoreDoPasses todos1' : todos2')
-      go b (todo : todos)
-        = let (b', todos') = go b todos
-          in (b', todo : todos')
-      go b []
-        = (b, [])
-  -}
-
-  newPass max mode
-    = CoreDoPluginPass "SeqSimpl" (runSimplifier (max*2) mode)
-
-runSimplifier :: Int -> SimplifierMode -> ModGuts -> CoreM ModGuts
-runSimplifier iters mode guts
+-- | Run the simplifier on the given Sequent Core module. The Core bindings in the
+-- given ModGuts are ignored and returned unchanged, but other parts are considered 
+-- valid and may be updated.
+runSimplifier :: Int -> SimplifierMode -> ModGuts -> SeqCoreProgram
+              -> CoreM (ModGuts, SeqCoreProgram)
+runSimplifier iters mode guts binds
   = do
-    when (tracing || dumping) $ putMsg  $ text "RUNNING SEQUENT CORE SIMPLIFIER"
-                                       $$ text "Mode:" <+> ppr mode
-    let coreBinds = mg_binds guts
-        binds = fromCoreModule coreBinds
-    when dumping $ putMsg  $ text "INITIAL CORE"
-                          $$ text "------------"
-                          $$ Core.pprCoreBindings coreBinds
-    when (dumping && not (null rules)) $
-      putMsg  $ text "CORE RULES"
-             $$ text "----------"
-             $$ ppr rules
-    when linting $ do
-      when dumping $ putMsg  $ text "LINT"
-                            $$ text "----"
-      runLint "pre-simpl" binds (text "--- Original Core: ---"
-                                 $$ Core.pprCoreBindings coreBinds)
-      when dumping $ putMsg $ text "LINT PASSED"
+    dflags <- getDynFlags
+    liftIO $ debugTraceMsg dflags 2  $ text "RUNNING SEQUENT CORE SIMPLIFIER"
+                                    $$ text "Mode:" <+> ppr mode
+    runLint "pre-simpl" binds empty
     binds' <- go 1 [] binds
-    let coreBinds' = bindsToCore binds'
-    when dumping $ putMsg  $ text "FINAL CORE"
-                          $$ text "----------"
-                          $$ Core.pprCoreBindings coreBinds'
-    return $ guts { mg_binds = coreBinds' }
+    return (guts, binds')
   where
     rules = mg_rules guts
     famEnvs = mg_fam_inst_env guts
@@ -181,20 +124,22 @@ runSimplifier iters mode guts
             famEnvs2 = (eps_fam_inst_env eps, famEnvs)
             env = initialEnv dflags mode rule_base2 famEnvs2
             occBinds = runOccurAnal env mod maybeVects maybeVectVars binds
-        when dumping $ putMsg  $ text "BEFORE" <+> int n
-                              $$ text "--------" $$ pprTopLevelBinds occBinds
+        whenDumping $ putMsg  $ text "BEFORE" <+> int n
+                             $$ text "--------" $$ pprTopLevelBinds occBinds
         runLint "in occurrence analysis" occBinds (text "--- Original Sequent Core: ---"
                                                    $$ pprTopLevelBinds binds)
-        when linting $ whenIsJust (lintCoreBindings occBinds) $ \err ->
+        whenLinting $ whenIsJust (lintCoreBindings occBinds) $ \err ->
           pprPanic "Sequent Core Lint error (in occurrence analysis)"
             (withPprStyle defaultUserStyle $ err)
         (binds', count) <- runSimplM $ simplModule env occBinds
-        when dumping $ putMsg  $ text "SUMMARY" <+> int n
-                              $$ text "---------"
-                              $$ pprSimplCount count
-                              $$ text "AFTER" <+> int n
-                              $$ text "-------"
-                              $$ pprTopLevelBinds binds'
+        -- FIXME Here we should also be updating the rules with the substitution
+        -- resulting from simplifying
+        whenDumping $ putMsg  $ text "SUMMARY" <+> int n
+                             $$ text "---------"
+                             $$ pprSimplCount count
+                             $$ text "AFTER" <+> int n
+                             $$ text "-------"
+                             $$ pprTopLevelBinds binds'
         runLint "post-simpl" binds' (text "--- Original Sequent Core: ---"
                                      $$ pprTopLevelBinds occBinds)
         if isZeroSimplCount count
@@ -209,11 +154,22 @@ runSimplifier iters mode guts
         in occurAnalysePgm mod isRuleActive rules vects vectVars binds
     
     runLint hdr binds extraDoc
-      = when linting $ whenIsJust (lintCoreBindings binds) $ \err ->
+      = whenLinting $
+        whenIsJust (lintCoreBindings binds) $ \err ->
           pprPgmError ("Sequent Core Lint error (" ++ hdr ++ ")")
             (withPprStyle defaultUserStyle $ err
                                           $$ pprTopLevelBinds binds 
                                           $$ extraDoc)
+    
+    whenLinting m
+      = do
+        dflags <- getDynFlags
+        when (gopt Opt_DoCoreLinting dflags) m
+    
+    whenDumping m
+      = do
+        dflags <- getDynFlags
+        when (dopt Opt_D_dump_simpl_iterations dflags) m
       
 -----------
 -- Binds --
