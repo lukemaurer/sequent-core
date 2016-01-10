@@ -73,7 +73,6 @@ import CoreSyn          ( Unfolding,
                           neverUnfoldGuidance )
 import qualified CoreSyn as Core
 import CoreUnfold       ( mkInlinableUnfolding )
-import CoreMonad        ( FloatOutSwitches(..) )
 import CoreArity        ( exprBotStrictness_maybe )
 import Coercion         ( coercionKind, isCoVar )
 import CoreSubst        ( Subst, emptySubst, substBndrs, substRecBndrs,
@@ -248,19 +247,18 @@ instance Eq Level where
 setLevels :: DynFlags
           -> SeqFlags
           -> FloatOutSwitches
-          -> Maybe FinalPassSwitches
           -> SeqCoreProgram
           -> UniqSupply
           -> [Levelled Bind]
-setLevels dflags sflags float_lams fps binds us
+setLevels dflags sflags float_lams binds us
   = initLvl us2 (do_them init_env summarized_binds)
   where
-    init_env = initialEnv dflags sflags float_lams fps
+    init_env = initialEnv dflags sflags float_lams
 
     prepped_binds | is_final_pass = prepareForFinalPass dflags sflags us1 binds
                   | otherwise     = binds
 
-    is_final_pass = isJust fps
+    is_final_pass = isJust (finalPass_ float_lams)
     
     summarized_binds = summarizeProgram prepped_binds
 
@@ -1527,11 +1525,11 @@ data LevelEnv
         -- The domain of the le_lvl_env is the *post-cloned* Ids
 
 initialEnv :: DynFlags -> SeqFlags
-           -> FloatOutSwitches -> Maybe FinalPassSwitches
+           -> FloatOutSwitches
            -> LevelEnv
-initialEnv dflags sflags float_lams fps
+initialEnv dflags sflags float_lams
   = LE { le_switches = float_lams
-       , le_finalPass = fps
+       , le_finalPass = finalPass_ float_lams
        , le_ctxt_lvl = tOP_LEVEL
        , le_lvl_env = emptyVarEnv
        , le_subst = emptySubst

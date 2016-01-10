@@ -10,7 +10,8 @@ import Language.SequentCore.Syntax
 import Language.SequentCore.Translate
 
 import BasicTypes ( CompilerPhase(..) )
-import CoreMonad  ( CoreM, CoreToDo(..), FloatOutSwitches(..), SimplifierMode(..) )
+import CoreMonad  ( CoreM, CoreToDo(..), SimplifierMode(..) )
+import qualified CoreMonad as Core
 import CoreSyn    ( CoreRule )
 import DynFlags
 import qualified ErrUtils as Err
@@ -20,9 +21,8 @@ import MonadUtils
 import Outputable
 import qualified PprCore as Core
 
-import Control.Monad ( foldM )
+import Control.Monad ( foldM, when )
 import Data.List
-import Data.Maybe
 
 installSequentCorePasses :: SeqFlags -> [CoreToDo] -> CoreM [CoreToDo]
 installSequentCorePasses sflags corePasses
@@ -36,7 +36,8 @@ installSequentCorePasses sflags corePasses
     return corePasses'
   where
     dump dflags hdr doc
-      = liftIO $ Err.debugTraceMsg dflags 2 $ vcat [ blankLine, text hdr, dashes, doc ]
+      = when (sdopt Opt_D_dump_seq_pipeline sflags) $ liftIO $
+          Err.debugTraceMsg dflags 2 $ vcat [ blankLine, text hdr, dashes, doc ]
       where
         dashes = text $ replicate (length hdr) '-'
     
@@ -45,7 +46,7 @@ data SeqCoreToDo
       Int -- Max iterations 
       SimplifierMode
   | SeqCoreDoSpecConstr
-  | SeqCoreDoFloatOutwards FloatOutSwitches (Maybe FinalPassSwitches)
+  | SeqCoreDoFloatOutwards FloatOutSwitches
   | SeqCoreDoPasses [SeqCoreToDo]
   | SeqCoreDoNothing
   | SeqCoreDoCore CoreToDo
@@ -70,9 +71,18 @@ mkSeqCorePipeline dflags sflags
     xlate CoreDoSpecConstr             | sgopt Opt_EnableSeqSpecConstr sflags
                                        = SeqCoreDoSpecConstr
     xlate (CoreDoFloatOutwards fs)     | sgopt Opt_EnableSeqFloatOut sflags
-                                       = SeqCoreDoFloatOutwards fs Nothing
+                                       = SeqCoreDoFloatOutwards (xlateFloatOutSwitches fs)
     xlate other                        = SeqCoreDoCore other
-  
+
+xlateFloatOutSwitches :: Core.FloatOutSwitches -> FloatOutSwitches
+xlateFloatOutSwitches fos
+  = FloatOutSwitches {
+      floatOutLambdas             = Core.floatOutLambdas             fos,
+      floatOutConstants           = Core.floatOutConstants           fos,
+      floatOutPartialApplications = Core.floatOutPartialApplications fos,
+      finalPass_                  = Nothing
+    }
+
 installLateLambdaLift :: DynFlags -> SeqFlags -> [SeqCoreToDo] -> [SeqCoreToDo]
 installLateLambdaLift dflags sflags todos
   = todos ++ [runWhen (sgopt SeqFlags.Opt_LLF sflags) lateLambdaLift]
@@ -80,7 +90,7 @@ installLateLambdaLift dflags sflags todos
   where
     lateLambdaLift
       = SeqCoreDoPasses [
-          SeqCoreDoFloatOutwards switchesForFinal (Just finalPassSwitches),
+          SeqCoreDoFloatOutwards switchesForFinal,
           simplAfterLateLambdaLift
         ]
 
@@ -92,6 +102,7 @@ installLateLambdaLift dflags sflags todos
       { floatOutLambdas             = SeqFlags.lateFloatNonRecLam sflags
       , floatOutConstants           = False
       , floatOutPartialApplications = False
+      , finalPass_                  = Just finalPassSwitches
       }
 
     finalPassSwitches = FinalPassSwitches
@@ -132,7 +143,7 @@ installLateLambdaLift dflags sflags todos
     simpl_phase phase names iter
       = SeqCoreDoPasses
       $   [ maybe_strictness_before phase
-          , SeqCoreDoSimplify iter
+          , mkSimplifyPass iter
                 (base_mode { sm_phase = Phase phase
                            , sm_names = names })
 
@@ -148,7 +159,7 @@ installLateLambdaLift dflags sflags todos
             else [])
 
         -- initial simplify: mk specialiser happy: minimum effort please
-    simpl_gently = SeqCoreDoSimplify max_iter
+    simpl_gently = mkSimplifyPass max_iter
                        (base_mode { sm_phase = InitialPhase
                                   , sm_names = ["Gentle"]
                                   , sm_rules = rules_on   -- Note [RULEs enabled in SimplGently]
@@ -156,6 +167,10 @@ installLateLambdaLift dflags sflags todos
                                   , sm_case_case = False })
                           -- Don't do case-of-case transformations.
                           -- This makes full laziness work better
+    
+    mkSimplifyPass iters mode
+      | sgopt Opt_EnableSeqSimpl sflags = SeqCoreDoSimplify iters mode
+      | otherwise                       = SeqCoreDoCore (CoreDoSimplify iters mode)                        
     
     runWhen cond todo | cond      = todo
                       | otherwise = SeqCoreDoNothing
@@ -202,8 +217,9 @@ toCorePipeline sflags seqPipeline = go [] seqPipeline []
         desc (SeqCoreDoSimplify _ m)             = "Simplifier \"" ++ head (sm_names m) ++
                                                    "\" (" ++ showPhase (sm_phase m) ++ ")"
         desc SeqCoreDoSpecConstr                 = "SpecConstr"
-        desc (SeqCoreDoFloatOutwards _ Nothing)  = "Float Out"
-        desc (SeqCoreDoFloatOutwards _ (Just _)) = "Late Lambda-Lifting"
+        desc (SeqCoreDoFloatOutwards fos)          
+          = case finalPass_ fos of Nothing      -> "Float Out"
+                                   Just _       -> "Late Lambda-Lifting"
         desc other                               = pprPanic "toCorePipeline" (ppr other)
         
         showPhase InitialPhase = "InitialPhase"
@@ -229,7 +245,7 @@ runSeqCorePasses sflags todos guts
         liftIO $ showPass dflags pass
         (guts', binds') <- case pass of
           SeqCoreDoSimplify iters mode  -> runSimplifier iters mode guts binds
-          SeqCoreDoFloatOutwards fs fpf -> bindsOnly $ runFloatOut fs sflags fpf binds
+          SeqCoreDoFloatOutwards fs     -> bindsOnly $ runFloatOut fs sflags binds
           SeqCoreDoSpecConstr           -> bindsOnly $ runSpecConstr binds
           SeqCoreDoPasses inner         -> doPasses (guts, binds) inner
           SeqCoreDoNothing              -> return (guts, binds)
@@ -317,10 +333,8 @@ pprSeqCoreToDo SeqCoreDoNothing        = text "(skip)"
 pprSeqCoreToDo (SeqCoreDoSimplify _ m) = text "Simplifier:" <+>
                                          doubleQuotes (text (head (sm_names m))) <+>
                                          parens (ppr (sm_phase m))
-pprSeqCoreToDo (SeqCoreDoFloatOutwards f fps)
-                                       = text "Float out" <+>
-                                         ppWhen (isJust fps) (text "(late)") <>
-                                         colon <+> ppr f
+pprSeqCoreToDo (SeqCoreDoFloatOutwards f)
+                                       = text "Float out" <> parens (ppr f)
 pprSeqCoreToDo SeqCoreDoSpecConstr     = text "SpecConstr"
 pprSeqCoreToDo (SeqCoreDoCore pass)    = text "Core:" <+> pprCoreToDo pass
 

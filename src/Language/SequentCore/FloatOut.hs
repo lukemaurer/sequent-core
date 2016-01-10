@@ -16,25 +16,19 @@
 -- for details
 {-# LANGUAGE CPP #-}
 
-module Language.SequentCore.FloatOut ( runFloatOut, floatOutwards, plugin ) where
+module Language.SequentCore.FloatOut ( runFloatOut, floatOutwards ) where
 
 import Language.SequentCore.Arity
-import Language.SequentCore.Driver.Flags hiding ( SeqGeneralFlag(..) )
-import qualified Language.SequentCore.Driver.Flags as SeqFlags
+import Language.SequentCore.Driver.Flags
 import Language.SequentCore.FloatOut.SetLevels
 import Language.SequentCore.Lint
-import Language.SequentCore.Plugin
 import Language.SequentCore.Syntax
 import Language.SequentCore.Syntax.Util
 
-import BasicTypes       ( CompilerPhase(..) )
 import CoreSyn          ( tickishScoped, mkNoCount )
-import CoreMonad        ( FloatOutSwitches(..), SimplifierMode(..)
-                        , CoreM, CoreToDo(..), Plugin(..)
-                        , defaultPlugin, reinitializeGlobals
-                        , runMaybe, runWhen )
+import CoreMonad        ( CoreM )
 import DynFlags
-import ErrUtils         ( dumpIfSet_dyn, errorMsg )
+import ErrUtils         ( dumpIfSet_dyn )
 import Id               ( Id, idArity, isBottomingId, zapDemandIdInfo )
 import Var              ( Var )
 import UniqSupply       ( UniqSupply, getUniqueSupplyM )
@@ -46,7 +40,6 @@ import FastString
 import MonadUtils       ( liftIO )
 
 import Control.Applicative ( (<$>), (<*>), pure )
-import Control.Monad
 import Control.Monad.Trans.Writer.Lazy
 import qualified Data.IntMap as M
 import Data.Monoid
@@ -55,125 +48,14 @@ import Data.Monoid
 #define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
 #define WARN( e, msg ) (warnPprTrace (e) __FILE__ __LINE__ (msg)) $
 
-plugin :: Plugin
-plugin = defaultPlugin {
-  installCoreToDos = \cmdLine todos -> do
-    reinitializeGlobals
-    let cmdLine' = concatMap words cmdLine
-          -- Allow -fplugin-opt=plugin:"opt1 opt2"
-    (sflags, leftovers, warns) <- parseSeqFlags cmdLine'
-    dflags <- getDynFlags
-    unless (null leftovers) $
-      liftIO $ errorMsg dflags $
-        text "Leftover options to Language.SequentCore.FloatOut:" $$
-        vcat (map text leftovers)
-    unless (null warns) $
-      liftIO $ errorMsg dflags $ vcat (map text warns)
-    let todos' = replace dflags sflags todos
-    return todos'
-} where
-  replace dflags sflags = go True
-    where
-      go top (CoreDoFloatOutwards switches : todos)
-        = normalPass switches : go top todos
-      go top (CoreDoPasses todos1 : todos2)
-        = CoreDoPasses (go False todos1) : go top todos2
-      go top (todo : todos)
-        = todo : go top todos
-      go top []
-        | top, sgopt SeqFlags.Opt_LLF sflags
-        = [finalPass, simplAfterFinalPass]
-        | otherwise
-        = []
-
-      normalPass switches
-        = CoreDoPluginPass "Float out (Sequent Core)"
-                           (sequentPass $ runFloatOut switches sflags Nothing)
-
-      finalPass
-        = CoreDoPluginPass "Late lambda-lifting (Sequent Core)"
-                           (sequentPass $ runFloatOut switchesForFinal sflags
-                                                      (Just finalPassSwitches))
-
-      simplAfterFinalPass
-        = runWhen (sgopt SeqFlags.Opt_LLF_Simpl sflags) $
-            simpl_phase 0 ["post-late-lam-lift"] max_iter
-
-      switchesForFinal = FloatOutSwitches
-        { floatOutLambdas             = SeqFlags.lateFloatNonRecLam sflags
-        , floatOutConstants           = False
-        , floatOutPartialApplications = False
-        }
-
-      finalPassSwitches = FinalPassSwitches
-        { fps_trace          = sdopt SeqFlags.Opt_D_dump_llf       sflags
-        , fps_stabilizeFirst = sgopt SeqFlags.Opt_LLF_Stabilize    sflags
-        , fps_rec            = SeqFlags.lateFloatRecLam            sflags
-        , fps_absUnsatVar    = sgopt SeqFlags.Opt_LLF_AbsUnsat     sflags
-        , fps_absSatVar      = sgopt SeqFlags.Opt_LLF_AbsSat       sflags
-        , fps_absOversatVar  = sgopt SeqFlags.Opt_LLF_AbsOversat   sflags
-        , fps_createPAPs     = sgopt SeqFlags.Opt_LLF_CreatePAPs   sflags
-        , fps_ifInClo        = SeqFlags.lateFloatIfInClo           sflags
-        , fps_cloGrowth      = SeqFlags.lateFloatCloGrowth         sflags
-        , fps_cloGrowthInLam = SeqFlags.lateFloatCloGrowthInLam    sflags
-        , fps_strictness     = sgopt SeqFlags.Opt_LLF_UseStr       sflags
-        , fps_oneShot        = sgopt SeqFlags.Opt_LLF_OneShot      sflags
-        }
-        
-      max_iter      = maxSimplIterations dflags
-      rule_check    = ruleCheck          dflags
-
-      rules_on      = gopt Opt_EnableRewriteRules           dflags
-      eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
-
-      maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
-
-      maybe_strictness_before phase
-        = runWhen (phase `elem` strictnessBefore dflags) CoreDoStrictness
-
-      base_mode = SimplMode { sm_phase      = panic "base_mode"
-                            , sm_names      = []
-                            , sm_rules      = rules_on
-                            , sm_eta_expand = eta_expand_on
-                            , sm_inline     = True
-                            , sm_case_case  = True }
-
-      simpl_phase phase names iter
-        = CoreDoPasses
-        $   [ maybe_strictness_before phase
-            , CoreDoSimplify iter
-                  (base_mode { sm_phase = Phase phase
-                             , sm_names = names })
-
-            , maybe_rule_check (Phase phase) ]
-
-            -- Vectorisation can introduce a fair few common sub expressions involving
-            --  DPH primitives. For example, see the Reverse test from dph-examples.
-            --  We need to eliminate these common sub expressions before their definitions
-            --  are inlined in phase 2. The CSE introduces lots of  v1 = v2 bindings,
-            --  so we also run simpl_gently to inline them.
-        ++  (if gopt Opt_Vectorise dflags && phase == 3
-              then [CoreCSE, simpl_gently]
-              else [])
-
-          -- initial simplify: mk specialiser happy: minimum effort please
-      simpl_gently = CoreDoSimplify max_iter
-                         (base_mode { sm_phase = InitialPhase
-                                    , sm_names = ["Gentle"]
-                                    , sm_rules = rules_on   -- Note [RULEs enabled in SimplGently]
-                                    , sm_inline = False
-                                    , sm_case_case = False })
-                            -- Don't do case-of-case transformations.
-                            -- This makes full laziness work better
-
-runFloatOut :: FloatOutSwitches -> SeqFlags -> Maybe FinalPassSwitches
+runFloatOut :: FloatOutSwitches -> SeqFlags
             -> SeqCoreProgram
             -> CoreM SeqCoreProgram
-runFloatOut switches sflags final binds
+runFloatOut switches sflags binds
   = do
     dflags <- getDynFlags
     us <- getUniqueSupplyM
-    liftIO $ floatOutwards switches final dflags sflags us binds
+    liftIO $ floatOutwards switches dflags sflags us binds
 
 {-
         -----------------
@@ -257,15 +139,14 @@ Well, maybe.  We don't do this at the moment.
 
 -}
 floatOutwards :: FloatOutSwitches
-              -> Maybe FinalPassSwitches
               -> DynFlags
               -> SeqFlags
               -> UniqSupply
               -> SeqCoreProgram -> IO SeqCoreProgram
 
-floatOutwards float_sws fps dflags sflags us pgm
+floatOutwards float_sws dflags sflags us pgm
   = do {
-        let { annotated_w_levels = setLevels dflags sflags float_sws fps pgm us ;
+        let { annotated_w_levels = setLevels dflags sflags float_sws pgm us ;
               (fss, binds_s')    = unzip (map floatTopBind annotated_w_levels)
             } ;
 

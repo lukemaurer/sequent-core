@@ -1,5 +1,6 @@
 module Language.SequentCore.Driver.Flags (
-  SeqFlags(..), SeqDumpFlag(..), SeqGeneralFlag(..), FinalPassSwitches(..),
+  SeqFlags(..), SeqDumpFlag(..), SeqGeneralFlag(..),
+  FloatOutSwitches(..), FinalPassSwitches(..),
   
   sgopt, sgopt_set, sgopt_unset,
   sdopt, sdopt_set, sdopt_unset,
@@ -8,8 +9,10 @@ module Language.SequentCore.Driver.Flags (
 ) where
 
 import CmdLineParser
-import Panic
+import FastString
 import MonadUtils
+import Outputable
+import Panic
 import SrcLoc
 
 import Control.Monad
@@ -30,6 +33,7 @@ parseSeqFlags args = do
 data SeqDumpFlag
   = Opt_D_dump_llf
   | Opt_D_dump_seq_xlate
+  | Opt_D_dump_seq_pipeline
   deriving (Eq, Ord, Enum)
 
 data SeqGeneralFlag
@@ -109,6 +113,7 @@ seqFlags :: [Flag (CmdLineP SeqFlags)]
 seqFlags = [
     Flag "ddump-llf"                     (setDumpFlag Opt_D_dump_llf)
   , Flag "ddump-seq-xlate"               (setDumpFlag Opt_D_dump_seq_xlate)
+  , Flag "ddump-seq-pipeline"            (setDumpFlag Opt_D_dump_seq_pipeline)
                   
   , Flag "fllf-nonrec-lam-limit"         (intSuffix (\n f -> f{ lateFloatNonRecLam = Just n }))
   , Flag "fllf-nonrec-lam-any"           (noArg       (\f -> f{ lateFloatNonRecLam = Nothing }))
@@ -200,6 +205,26 @@ setDumpFlag' :: SeqDumpFlag -> DynP ()
 setDumpFlag' dump_flag = upd (\dfs -> sdopt_set dfs dump_flag)
 
 --------------------------
+
+-- These two datatypes are copied from CoreMonad in the wip/llf branch. Defined
+-- here so that both Driver and FloatOut can use them.
+
+data FloatOutSwitches = FloatOutSwitches {
+  floatOutLambdas   :: Maybe Int,
+  -- ^ Just n <=> float lambdas to top level, if doing so will
+  -- abstract over n or fewer value variables Nothing <=> float all
+  -- lambdas to top level, regardless of how many free variables Just
+  -- 0 is the vanilla case: float a lambda iff it has no free vars
+  floatOutConstants :: Bool,
+  -- ^ True <=> float constants to top level, even if they do not
+  -- escape a lambda
+  floatOutPartialApplications :: Bool,
+  -- ^ True <=> float out partial applications based on arity
+  -- information.
+  finalPass_        :: Maybe FinalPassSwitches
+  -- ^ Nothing <=> not the final pass, behave like normal
+  }
+
 data FinalPassSwitches = FinalPassSwitches
   { fps_rec            :: !(Maybe Int)
   -- ^ used as floatOutLambdas for recursive lambdas
@@ -225,3 +250,29 @@ data FinalPassSwitches = FinalPassSwitches
   , fps_strictness        :: !Bool
   , fps_oneShot           :: !Bool
   }
+
+instance Outputable FloatOutSwitches where
+    ppr = pprFloatOutSwitches
+
+pprFloatOutSwitches :: FloatOutSwitches -> SDoc
+pprFloatOutSwitches sw 
+  = ptext (sLit "FOS") <+> (braces $
+     sep $ punctuate comma $ 
+     [ ptext (sLit "Lam =")    <+> ppr (floatOutLambdas sw)
+     , ptext (sLit "Consts =") <+> ppr (floatOutConstants sw)
+     , ptext (sLit "PAPs =")   <+> ppr (floatOutPartialApplications sw)
+     , ptext (sLit "Late =")   <+> ppr (finalPass_ sw)])
+
+instance Outputable FinalPassSwitches where
+    ppr = pprFinalPassSwitches
+
+pprFinalPassSwitches :: FinalPassSwitches -> SDoc
+pprFinalPassSwitches sw = sep $ punctuate comma $
+  [ ptext (sLit "Rec =")    <+> ppr (fps_rec sw)
+  , ptext (sLit "AbsUnsatVar =") <+> ppr (fps_absUnsatVar sw)
+  , ptext (sLit "AbsSatVar =") <+> ppr (fps_absSatVar sw)
+  , ptext (sLit "AbsOversatVar =") <+> ppr (fps_absOversatVar sw)
+  , ptext (sLit "ClosureGrowth =") <+> ppr (fps_cloGrowth sw)
+  , ptext (sLit "ClosureGrowthInLam =") <+> ppr (fps_cloGrowthInLam sw)
+  , ptext (sLit "StabilizeFirst =") <+> ppr (fps_stabilizeFirst sw)
+  ]
