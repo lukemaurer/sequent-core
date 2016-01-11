@@ -453,6 +453,21 @@ lvlComm env ty (_, AnnLet bind body)
 lvlComm env ty (_, AnnEval term frames end)
   = do
     (term', frames') <- case term of
+      -- If the end is a Case, then the term and frames (i.e. the scrutinee)
+      -- constitute a candidate for MFE. Thus we stick them together and try
+      -- floating them. Careful! lvlMFEComm will call lvlComm, and all that
+      -- prevents an infinite loop is that the end will be a Return this time.
+      _ | (_, AnnCase {}) <- end ->
+        do
+        let summ = getSummary term `unionSumm` unionSumms (map getSummary frames)
+            comm = (summ, AnnEval term frames (emptySumm, AnnReturn))
+            ty   = applyTypeToFrames (termType (deAnnotateTerm term))
+                                     (map deAnnotateFrame frames)
+        comm' <- lvlMFEComm True env ty comm
+        case comm' of
+          Eval term' frames' Return -> return (term', frames') -- common case
+          _                         -> return (Compute ty comm', [])
+        
       -- float out partial applications.  This is very beneficial
       -- in some cases (-7% runtime -4% alloc over nofib -O2).
       -- In order to float a PAP, there must be a function at the
