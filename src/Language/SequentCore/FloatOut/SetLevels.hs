@@ -1165,6 +1165,9 @@ decideLateLambdaFloat :: LevelEnv -> FinalPassSwitches
                       -> SDoc  -- ^ Debug info for -ddump-late-float
                       -> Maybe VarSet -- Nothing <=> float to tOP_LEVEL
                                       -- Just xs <=> don't float, blaming xs
+                                      -- If not (null xs), then forgetting fast
+                                      -- calls to identifiers in xs is the only
+                                      -- thing holding us back.
 decideLateLambdaFloat env fps is_rec all_one_shot abs_ids_set
                       slowdowns space_info ids extra_sdoc
   | fps_trace fps, pprTrace msg msg_sdoc False = {- trace clause -} undefined
@@ -1177,7 +1180,7 @@ decideLateLambdaFloat env fps is_rec all_one_shot abs_ids_set
     msg = '\n' :
           (if floating then "late-float" else "late-no-float") ++
           (if isRec is_rec then "(rec " ++ show (length ids) ++ ")" else "") ++
-          (if floating && is_bad_space then "(SAT)" else "") -- FIXME Dead code
+          (if all_one_shot then "(1)" else "")
 
     is_bad_time = not (isEmptyVarSet slowdowns)
 
@@ -1211,7 +1214,7 @@ decideLateLambdaFloat env fps is_rec all_one_shot abs_ids_set
     msg_sdoc = vcat (zipWith space ids space_info) where
       abs_ids = varSetElems abs_ids_set
       space v (badPAP, closureSize, cg, cgil) = vcat
-       [ ppr v
+       [ ppr v <+> ppWhen (isJoinId v) (text "(join)")
        , text "size:" <+> ppr closureSize
        , text "abs_ids:" <+> ppr (length abs_ids) <+> ppr abs_ids
        , text "createsPAPs:" <+> ppr badPAP
@@ -1285,6 +1288,7 @@ wouldIncreaseAllocation env abs_ids_set pairs
                         (Summary { sm_varsUsed = vus, sm_skeleton = scope_sk })
   = ASSERT(all isId (varSetElems abs_ids_set))
     flip map bndrs $ \(TB bndr _) -> case lookupVarEnv vus bndr of
+    _ | isJoinId bndr -> (False, 0, 0, 0) -- no closure to grow or be stored
     Nothing -> (False, closuresSize, 0, 0) -- it's a dead variable. Huh.
     Just (_, vu) -> (violatesPAPs, closuresSize, closureGrowth, closureGrowthInLambda)
       where
