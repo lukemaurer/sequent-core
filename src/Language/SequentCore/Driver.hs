@@ -232,8 +232,8 @@ runSeqCorePasses sflags todos guts
     dflags <- getDynFlags
     let binds = fromCoreModule (mg_binds guts)
     liftIO $
-      Err.dumpIfSet dflags (sdopt Opt_D_dump_seq_xlate sflags) "Translated Sequent Core" $
-      pprTopLevelBinds binds
+      Err.dumpIfSet dflags (dumping dflags) "Translated Sequent Core" $
+        pprTopLevelBinds binds
     (guts', binds') <- doPasses (guts, binds) todos
     return $ guts' { mg_binds = bindsToCore binds' }
   where
@@ -253,7 +253,10 @@ runSeqCorePasses sflags todos guts
         liftIO $ endPass dflags pass binds' (mg_rules guts')
         return (guts', binds')
       where
-        bindsOnly m = m >>= \binds' -> return (guts, binds') 
+        bindsOnly m = m >>= \binds' -> return (guts, binds')
+    
+    dumping dflags = sdopt Opt_D_dump_seq_xlate sflags ||
+                     dopt Opt_D_verbose_core2core dflags
 
 showPass :: DynFlags -> SeqCoreToDo -> IO ()
 showPass dflags pass = Err.showPass dflags ("(Sequent Core) " ++ showPpr dflags pass)
