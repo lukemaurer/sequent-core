@@ -30,6 +30,7 @@ library
   exposed-modules:     Language.SequentCore
                        Language.SequentCore.Annot
                        Language.SequentCore.Arity
+                       Language.SequentCore.Contify
                        Language.SequentCore.Dump
                        Language.SequentCore.FloatOut
                        Language.SequentCore.FVs

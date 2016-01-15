@@ -24,7 +24,8 @@ module Language.SequentCore.Syntax (
   addLets, addLetsToTerm, addNonRec,
   mkTickTerm, mkTickCommand, tickHNFArgs,
   -- * Deconstructors
-  collectBinders, collectArgs, collectTypeArgs, collectTypeAndOtherArgs, collectArgsUpTo,
+  collectBinders, collectTypeBinders, collectTypeAndValueBinders,
+  collectArgs, collectTypeArgs, collectTypeAndValueArgs, collectArgsUpTo,
   splitCastTerm, splitCastCommand,
   spanTypes,
   flattenCommand,
@@ -33,7 +34,7 @@ module Language.SequentCore.Syntax (
   isReturnKont, isReturn, isDefaultAlt,
   termIsConstruction, termAsConstruction, splitConstruction,
   commandAsSaturatedCall, asSaturatedCall, asValueCommand,
-  binderOfPair, setPairBinder,
+  binderOfPair, setPairBinder, partitionBindPairs,
   bindsTerm, bindsJoin, flattenBind, flattenBinds,
   bindersOf, bindersOfBinds, mapBindersOfBind,
   -- * Tagged binders
@@ -80,7 +81,7 @@ import Pair      ( Pair(..), pSnd )
 import PrimOp    ( PrimOp(..), primOpOkForSpeculation, primOpOkForSideEffects
                  , primOpIsCheap )
 import TyCon
-import Type      ( Type, KindOrType, eqType )
+import Type      ( Type, KindOrType, TyVar, eqType )
 import qualified Type
 import TysPrim
 import TysWiredIn
@@ -257,7 +258,9 @@ mkComputeEval v fs = mkCompute ty (Eval v fs Return)
 {-# SPECIALIZE mkComputeEval :: Tagged Term t -> [Tagged Frame t] -> Tagged Term t #-}
 
 -- | Forms a term comprising the application of several arguments to a term.
+-- Returns the function itself if the argument list is empty.
 mkAppTerm :: HasId b => Term b -> [Term b] -> Term b
+mkAppTerm fun []   = fun
 mkAppTerm fun args = mkComputeEval fun (map App args)
 
 {-# SPECIALIZE mkAppTerm :: SeqCoreTerm   -> [SeqCoreTerm]   -> SeqCoreTerm   #-}
@@ -395,6 +398,31 @@ collectBinders (Lam x body) = (x : xs, body')
   where (xs, body') = collectBinders body
 collectBinders term         = ([], term)
 
+-- | Divide a term into a sequence of lambda-bound type variables and a body
+-- (which may be a value lambda). If @v@ is not a type lambda, then
+-- @collectTypeBinders v == ([], v)@.
+collectTypeBinders :: SeqCoreTerm -> ([TyVar], SeqCoreTerm)
+collectTypeBinders (Lam x body) | Type.isTyVar x = (x : xs, body')
+  where (xs, body') = collectTypeBinders body
+collectTypeBinders term                          = ([], term)
+
+-- | Divide a term into a sequence of lambda-bound value variables and a body
+-- (which may be a type lambda). If @v@ is not a value lambda, then
+-- @collectValueBinders v == ([], v)@.
+collectValueBinders :: SeqCoreTerm -> ([Id], SeqCoreTerm)
+collectValueBinders (Lam x body) | isId x = (x : xs, body')
+  where (xs, body') = collectValueBinders body
+collectValueBinders term                  = ([], term)
+
+-- | Divide a term into a sequence of lambda-bound type variables, a sequence
+-- of lambda-bound value variables, and a body (which may be a type lambda). If
+-- @v@ is not a lambda, then @collectTypeAndValueBinders v == ([], v)@.
+collectTypeAndValueBinders :: SeqCoreTerm -> ([TyVar], [Id], SeqCoreTerm)
+collectTypeAndValueBinders term
+  = let (tyVars, body1) = collectTypeBinders term
+        (valVars, body) = collectValueBinders body1
+    in (tyVars, valVars, body)
+
 -- | Divide a list of frames into a sequence of value arguments and an outer
 -- continuation. If @fs@ does not start with a value application frame, then
 -- @collectArgs fs == ([], fs)@.
@@ -417,12 +445,12 @@ collectTypeArgs frames
 
 -- | Divide a list of frames into a sequence of type arguments, then a sequence
 -- of non-type arguments, then the rest. If @fs@ does not start with an
--- application frame, then @collectTypeAndOtherArgs fs == ([], [], fs)@.
+-- application frame, then @collectTypeAndValueArgs fs == ([], [], fs)@.
 -- Note that, in general, type and value arguments can be arbitrarily
 -- intermingled, so the remaining frames may in fact have further arguments
 -- (starting with type arguments).
-collectTypeAndOtherArgs :: [Frame b] -> ([KindOrType], [Term b], [Frame b])
-collectTypeAndOtherArgs fs
+collectTypeAndValueArgs :: [Frame b] -> ([KindOrType], [Term b], [Frame b])
+collectTypeAndValueArgs fs
   = let (tys, fs') = collectTypeArgs fs
         (vs, fs'') = collectArgs fs'
     in (tys, vs, fs'')
@@ -619,7 +647,7 @@ splitConstruction (Var fid) (frames, end)
   , length valArgs == dataConRepArity dataCon
   = Just (dataCon, tyArgs, valArgs, (frames', end))
   where
-    (tyArgs, valArgs, frames') = collectTypeAndOtherArgs frames
+    (tyArgs, valArgs, frames') = collectTypeAndValueArgs frames
 splitConstruction _ _
   = Nothing
 
@@ -681,6 +709,23 @@ binderOfPair (BindJoin j _) = j
 setPairBinder :: BindPair b -> b -> BindPair b
 setPairBinder (BindTerm _ term) x = BindTerm x term
 setPairBinder (BindJoin _ pk)   j = BindJoin j pk
+
+-- | Split a list of bind pairs into a list of binder-term pairs and a list of
+-- binder-join pairs.
+-- 
+-- Notes to keep in mind when the argument is a recursive group: 
+--   * Relative order is not meaningful within a recursive group, so it does not
+--     matter that interleaved terms and joins will be pulled apart.
+--   * A recursive group is allowed to include both terms and joins even though
+--     they cannot be truly mutually recursive, as there is in general no
+--     invariant that recursive groups are minimal. In other words, a recursive
+--     group mixing terms and joins is always non-optimal but not necessarily
+--     an error. (Running a term through 'OccurAnal' should always break up any
+--     such bindings.)
+partitionBindPairs :: [BindPair b] -> ([(b, Term b)], [(b, Join b)])
+partitionBindPairs = foldr cons ([], []) where
+  cons (BindTerm bndr term) (valPairs, joinPairs) = ((bndr, term):valPairs, joinPairs)
+  cons (BindJoin bndr join) (valPairs, joinPairs) = (valPairs, (bndr, join):joinPairs) 
 
 -- | Get the binders from a binding.
 bindersOf :: Bind b -> [b]
@@ -1016,7 +1061,7 @@ cutCheap :: HasId b => CheapAppMeasure -> Term b -> [Frame b] -> End b -> Bool
 cutCheap appCheap term (Cast _ : fs) end
   = cutCheap appCheap term fs end
 cutCheap appCheap (Var fid) fs@(App {} : _) end
-  = case collectTypeAndOtherArgs fs of
+  = case collectTypeAndValueArgs fs of
       (_, [], fs')   -> kontCheap appCheap (fs', end)
       (_, args, fs')
         | appCheap fid (length args)
