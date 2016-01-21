@@ -21,7 +21,7 @@ module Language.SequentCore.Syntax.Util (
   termFreeVars,
 
   -- * Uniquification
-  uniquifyProgram,
+  uniquifyProgram, uniquifyTerm,
   
   -- * Floats
   FloatBind(..), wrapFloat, wrapTermInFloat
@@ -319,12 +319,17 @@ termFreeVars :: SeqCoreTerm -> VarSet
 termFreeVars = freeVars -- see Language.SequentCore.FVs
 
 uniquifyProgram :: SeqCoreProgram -> SeqCoreProgram
-uniquifyProgram prgm
-  = evalState (mapM doTopBind prgm) initState
+uniquifyTerm    :: SeqCoreTerm -> SeqCoreTerm
+(uniquifyProgram, uniquifyTerm) 
+  = ( \prgm -> evalState (mapM doTopBind prgm) (initState prgm)
+    , \term -> evalState (doTerm term)         (stateForTerm term) )
   where
-    initState :: Subst
-    initState = CoreSubst.mkEmptySubst (mkInScopeSet (mkVarSet (bindersOfBinds prgm)))
+    initState :: SeqCoreProgram -> Subst
+    initState prgm = CoreSubst.mkEmptySubst (mkInScopeSet (mkVarSet (bindersOfBinds prgm)))
                   -- Top-level binders are always in scope and cannot be changed
+
+    stateForTerm :: SeqCoreTerm -> Subst
+    stateForTerm term = CoreSubst.mkEmptySubst (mkInScopeSet (termFreeVars term))
 
     doTopBind :: SeqCoreBind -> State Subst SeqCoreBind
     doTopBind (NonRec pair) = NonRec <$> doPair pair

@@ -1,13 +1,16 @@
 module Language.SequentCore.Driver ( installSequentCorePasses ) where
 
 import Language.SequentCore.Driver.Flags as SeqFlags
-import Language.SequentCore.FloatOut   ( runFloatOut )
 import Language.SequentCore.Lint
 import Language.SequentCore.Pretty
-import Language.SequentCore.Simpl      ( runSimplifier )
-import Language.SequentCore.SpecConstr ( runSpecConstr )
 import Language.SequentCore.Syntax
 import Language.SequentCore.Translate
+
+-- Passes
+import Language.SequentCore.Contify    ( runContify )
+import Language.SequentCore.FloatOut   ( runFloatOut )
+import Language.SequentCore.Simpl      ( runSimplifier )
+import Language.SequentCore.SpecConstr ( runSpecConstr )
 
 import BasicTypes ( CompilerPhase(..) )
 import CoreMonad  ( CoreM, CoreToDo(..), SimplifierMode(..) )
@@ -20,6 +23,7 @@ import Maybes     ( whenIsJust )
 import MonadUtils
 import Outputable
 import qualified PprCore as Core
+import SrcLoc     ( noSrcSpan )
 
 import Control.Monad ( foldM, when )
 import Data.List
@@ -37,7 +41,8 @@ installSequentCorePasses sflags corePasses
   where
     dump dflags hdr doc
       = when (sdopt Opt_D_dump_seq_pipeline sflags) $ liftIO $
-          Err.debugTraceMsg dflags 2 $ vcat [ blankLine, text hdr, dashes, doc ]
+          log_action dflags dflags Err.SevInfo noSrcSpan defaultDumpStyle $
+            vcat [ blankLine, text hdr, dashes, doc ]
       where
         dashes = text $ replicate (length hdr) '-'
     
@@ -45,6 +50,7 @@ data SeqCoreToDo
   = SeqCoreDoSimplify
       Int -- Max iterations 
       SimplifierMode
+  | SeqCoreDoContify ContifySwitches
   | SeqCoreDoSpecConstr
   | SeqCoreDoFloatOutwards FloatOutSwitches
   | SeqCoreDoPasses [SeqCoreToDo]
@@ -53,6 +59,7 @@ data SeqCoreToDo
 
 dumpFlag :: SeqCoreToDo -> Maybe DumpFlag
 dumpFlag (SeqCoreDoSimplify {})      = Just Opt_D_dump_simpl_phases
+dumpFlag (SeqCoreDoContify {})       = Just Opt_D_verbose_core2core
 dumpFlag (SeqCoreDoFloatOutwards {}) = Just Opt_D_verbose_core2core
 dumpFlag SeqCoreDoSpecConstr         = Just Opt_D_dump_spec
 
@@ -62,7 +69,7 @@ dumpFlag (SeqCoreDoCore {})          = Nothing
 
 mkSeqCorePipeline :: DynFlags -> SeqFlags -> [CoreToDo] -> [SeqCoreToDo]
 mkSeqCorePipeline dflags sflags
-  = installLateLambdaLift dflags sflags . map xlate
+  = contifyBetweenPasses sflags . installNewPasses dflags sflags . map xlate
   where
     xlate CoreDoNothing                = SeqCoreDoNothing
     xlate (CoreDoPasses inner)         = SeqCoreDoPasses (map xlate inner)
@@ -83,17 +90,31 @@ xlateFloatOutSwitches fos
       finalPass_                  = Nothing
     }
 
-installLateLambdaLift :: DynFlags -> SeqFlags -> [SeqCoreToDo] -> [SeqCoreToDo]
-installLateLambdaLift dflags sflags todos
-  = todos ++ [runWhen (sgopt SeqFlags.Opt_LLF sflags) lateLambdaLift]
-      -- qualify Opt_LLF for compatibility with GHC llf branch
+installNewPasses :: DynFlags -> SeqFlags -> [SeqCoreToDo] -> [SeqCoreToDo]
+installNewPasses dflags sflags todos
+  = todos ++ [contify, lateLambdaLift]
   where
+    contify
+      = runWhen (sgopt Opt_EnableContify sflags) $
+          SeqCoreDoPasses [
+            SeqCoreDoContify (ContifySwitches { cs_gentle = False }),
+            simplAfterContify
+          ]
+    
     lateLambdaLift
-      = SeqCoreDoPasses [
-          SeqCoreDoFloatOutwards switchesForFinal,
-          simplAfterLateLambdaLift
-        ]
+      = runWhen (sgopt SeqFlags.Opt_LLF sflags) $
+          -- qualify Opt_LLF for compatibility with GHC llf branch
+          SeqCoreDoPasses [
+            SeqCoreDoFloatOutwards switchesForFinal,
+            simplAfterLateLambdaLift
+          ]
 
+    simplAfterContify
+      = runWhen (sgopt Opt_Contify_Simpl sflags) $
+          simpl_phase_with SeqCoreDoSimplify 0 ["post-contify"] max_iter
+            -- always use Sequent Core simplifier; Core simplifier unlikely to
+            -- get much use from aggressive contification and may undo it
+    
     simplAfterLateLambdaLift
       = runWhen (sgopt SeqFlags.Opt_LLF_Simpl sflags) $
           simpl_phase 0 ["post-late-lam-lift"] max_iter
@@ -140,10 +161,12 @@ installLateLambdaLift dflags sflags todos
                           , sm_inline     = True
                           , sm_case_case  = True }
 
-    simpl_phase phase names iter
+    simpl_phase = simpl_phase_with mkSimplifyPass
+    
+    simpl_phase_with mkPass phase names iter
       = SeqCoreDoPasses
       $   [ maybe_strictness_before phase
-          , mkSimplifyPass iter
+          , mkPass iter
                 (base_mode { sm_phase = Phase phase
                            , sm_names = names })
 
@@ -178,6 +201,33 @@ installLateLambdaLift dflags sflags todos
     runMaybe (Just x) f = f x
     runMaybe Nothing  _ = SeqCoreDoNothing
   
+contifyBetweenPasses :: SeqFlags -> [SeqCoreToDo] -> [SeqCoreToDo]
+contifyBetweenPasses sflags todos
+  | not (sgopt Opt_ContifyBetweenSeqPasses sflags)
+  = todos
+  | otherwise
+  = go (flattenPipeline todos)
+  where
+    go []         = []
+    go [p]        = [p]
+    go (p1:p2:ps) | cfy_here p1 p2 = p1:cfy:go (p2:ps)
+                  | otherwise      = p1:    go (p2:ps)
+    
+    cfy_here (SeqCoreDoContify {}) _ = False
+    cfy_here _ (SeqCoreDoContify {}) = False
+    cfy_here (SeqCoreDoCore {}) _    = False
+    cfy_here _ (SeqCoreDoCore {})    = False
+    cfy_here _ _                     = True
+    
+    cfy = SeqCoreDoContify (ContifySwitches { cs_gentle = True })
+    
+flattenPipeline :: [SeqCoreToDo] -> [SeqCoreToDo]
+flattenPipeline = concatMap flatten
+  where
+    flatten SeqCoreDoNothing        = []
+    flatten (SeqCoreDoPasses todos) = flattenPipeline todos
+    flatten todo                    = [todo]
+
 -- Flattens the pipeline as a side effect, but this is unlikely to matter much.
 toCorePipeline :: SeqFlags -> [SeqCoreToDo] -> [CoreToDo]
 toCorePipeline sflags seqPipeline = go [] seqPipeline []
@@ -216,11 +266,14 @@ toCorePipeline sflags seqPipeline = go [] seqPipeline []
         
         desc (SeqCoreDoSimplify _ m)             = "Simplifier \"" ++ head (sm_names m) ++
                                                    "\" (" ++ showPhase (sm_phase m) ++ ")"
+        desc (SeqCoreDoContify cs)
+          = case cs_gentle cs of True           -> "Contify (Gentle)"
+                                 False          -> "Contify"
         desc SeqCoreDoSpecConstr                 = "SpecConstr"
         desc (SeqCoreDoFloatOutwards fos)          
           = case finalPass_ fos of Nothing      -> "Float Out"
                                    Just _       -> "Late Lambda-Lifting"
-        desc other                               = pprPanic "toCorePipeline" (ppr other)
+        desc _                                   = "???"
         
         showPhase InitialPhase = "InitialPhase"
         showPhase (Phase n)    = show n
@@ -245,6 +298,7 @@ runSeqCorePasses sflags todos guts
         liftIO $ showPass dflags pass
         (guts', binds') <- case pass of
           SeqCoreDoSimplify iters mode  -> runSimplifier iters mode guts binds
+          SeqCoreDoContify cs           -> bindsOnly $ return $ runContify cs binds
           SeqCoreDoFloatOutwards fs     -> bindsOnly $ runFloatOut fs sflags binds
           SeqCoreDoSpecConstr           -> bindsOnly $ runSpecConstr binds
           SeqCoreDoPasses inner         -> doPasses (guts, binds) inner
@@ -336,6 +390,7 @@ pprSeqCoreToDo SeqCoreDoNothing        = text "(skip)"
 pprSeqCoreToDo (SeqCoreDoSimplify _ m) = text "Simplifier:" <+>
                                          doubleQuotes (text (head (sm_names m))) <+>
                                          parens (ppr (sm_phase m))
+pprSeqCoreToDo (SeqCoreDoContify cs)   = text "Contify" <+> parens (ppr cs)
 pprSeqCoreToDo (SeqCoreDoFloatOutwards f)
                                        = text "Float out" <> parens (ppr f)
 pprSeqCoreToDo SeqCoreDoSpecConstr     = text "SpecConstr"

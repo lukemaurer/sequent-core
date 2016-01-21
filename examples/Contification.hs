@@ -25,7 +25,7 @@ case2b_gone ()
         _k f = f 1#
     in 3#
 
--- Can't contify because one call is in non-tail position
+-- Can't contify because one call is not in tail position
 -- (even though the other is).
 case3_no :: Bool
 case3_no
@@ -45,6 +45,15 @@ case4_mixed
         {-# NOINLINE g #-}
         g y = k (y 5#)
     in if flag && k 3# then True else g (+# 1#)
+    
+-- Can contify both; decision to contify g propagates upward
+case4b_yes :: Bool
+case4b_yes
+  = let {-# NOINLINE k #-}
+        k x = case x of { 0# -> True; _ -> False }
+        {-# NOINLINE g #-}
+        g y = k (y 5#)
+    in if flag then k 3# else g (+# 1#)
 
 -- Can contify; tail-called from one branch and not used in the other
 case5_yes :: Bool
@@ -118,7 +127,7 @@ case10_no x =
       f y = k (y -# 1#)
   in f x
 
--- We would like to handle this case, but seems to require abstract
+-- We would like to handle this case, but it seems to require abstract
 -- interpretation: We need to fix the type argument to h but it's only ever
 -- called with an inner-bound tyvar as the type.
 case11_yes_someday :: [Bool] -> [Bool]
@@ -146,6 +155,16 @@ case12_mixed
         {-# NOINLINE h #-}
         h = \x -> k (x +# 1#) -- Not a tail call! Outer context wants Int# -> Int#
     in h
+
+case13_yes :: Int -> Int
+case13_yes x
+  = let k, h :: Int -> Int
+        {-# NOINLINE k #-}
+        k y = if y == 0 then 1 else h (y-1)
+        
+        {-# NOINLINE h #-}
+        h y = if y == 0 then 0 else k (y-1)
+    in k x
 
 main :: IO ()
 main = return ()
