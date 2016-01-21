@@ -49,11 +49,11 @@ import Util       ( lengthExceeds )
 
 -- | Translates a list of Core bindings into Sequent Core.
 fromCoreModule :: [Core.CoreBind] -> [SeqCoreBind]
-fromCoreModule = runContify . fromCoreTopLevelBinds
+fromCoreModule = runContifyGently . fromCoreTopLevelBinds
 
 -- | Translates a single Core expression as a Sequent Core term.
 termFromCoreExpr :: Core.CoreExpr -> SeqCoreTerm
-termFromCoreExpr = contifyInTerm . fromCoreExprAsTerm
+termFromCoreExpr = contifyGentlyInTerm . fromCoreExprAsTerm
 
 fromCoreExpr :: Core.CoreExpr -> SeqCoreKont -> SeqCoreCommand
 fromCoreExpr expr (fs, end) = go [] expr fs end

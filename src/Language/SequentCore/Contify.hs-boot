@@ -2,5 +2,5 @@ module Language.SequentCore.Contify where
 
 import Language.SequentCore.Syntax
 
-runContify    :: SeqCoreProgram -> SeqCoreProgram
-contifyInTerm :: SeqCoreTerm -> SeqCoreTerm
+runContify, runContifyGently       :: SeqCoreProgram -> SeqCoreProgram
+contifyInTerm, contifyGentlyInTerm :: SeqCoreTerm -> SeqCoreTerm
