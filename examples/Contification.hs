@@ -147,5 +147,15 @@ case12_mixed
         h = \x -> k (x +# 1#) -- Not a tail call! Outer context wants Int# -> Int#
     in h
 
+case13_yes :: Int -> Int
+case13_yes x
+  = let k, h :: Int -> Int
+        {-# NOINLINE k #-}
+        k y = if y == 0 then 1 else h (y-1)
+        
+        {-# NOINLINE h #-}
+        h y = if y == 0 then 0 else k (y-1)
+    in k x
+
 main :: IO ()
 main = return ()
