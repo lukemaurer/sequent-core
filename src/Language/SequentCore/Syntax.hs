@@ -30,7 +30,7 @@ module Language.SequentCore.Syntax (
   spanTypes,
   flattenCommand,
   isValueArg, isTypeArg, isCoArg, isTyCoArg, isAppFrame, isValueAppFrame,
-  isTrivial, isTrivialTerm, isTrivialKont, isTrivialJoin,
+  isTrivial, isTrivialTerm, isTrivialFrame, isTrivialKont, isTrivialJoin,
   isReturnKont, isReturn, isDefaultAlt,
   termIsConstruction, termAsConstruction, splitConstruction,
   commandAsSaturatedCall, asSaturatedCall, asValueCommand,
