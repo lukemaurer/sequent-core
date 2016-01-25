@@ -568,17 +568,17 @@ simplJoinBind _env _dsc _csc new_bndr _dsc_rhs _csc_rhs old_bndr join recFlag
   = undefined
 simplJoinBind env dsc csc new_bndr dsc_rhs csc_rhs old_bndr join _recFlag
   = do
-    (flts, join') <- simplJoin env dsc_rhs csc_rhs join
-    env' <-
-      if isEmptyFloats flts
-         then    return env
-         else do tick LetFloatFromLet -- Can always float through a cont binding
-                                      -- (If the cont has parameters, the floats
-                                      -- won't make it here; see simplJoin.)
-                 return $ env `augmentFromFloats` flts
-    addingFloats2 flts $ completeJoinBind env' dsc csc old_bndr new_bndr join' NotTopLevel
+    join' <- simplJoin env dsc_rhs csc_rhs join
+    -- Note [Don't float from join point] 
+    completeJoinBind env dsc csc old_bndr new_bndr join' NotTopLevel
 
 {-
+Note [Don't float from join point]
+
+We used to float from nullary join points because we could, but this was
+probably never useful as it could not have increased sharing. Float Out is the
+proper place to be floating from lambdas and such.
+
 Note [Call ensureDupableKont outside join point]
 
 We need to make sure we call ensureDupableKont whenever the same binding of ret,
@@ -593,19 +593,8 @@ might cause an extra iteration if mkDupableKont creates bindings that are only
 used once.
 -}
 
-simplJoin :: SimplEnv -> DataScope -> ControlScope -> InJoin -> SimplM (Floats, OutJoin)
-simplJoin env dsc csc pk
-  = case pk of
-      -- Can only float bindings out if there are no parameters
-      Join [] comm -> do
-        (flts, comm') <- simplCommand env dsc csc comm
-        return (flts, Join [] comm')
-      _ -> do
-        pk' <- simplJoinNoFloats env dsc csc pk
-        return (emptyFloats, pk')
-
-simplJoinNoFloats :: SimplEnv -> DataScope -> ControlScope -> InJoin -> SimplM OutJoin
-simplJoinNoFloats env dsc csc (Join xs comm)
+simplJoin :: SimplEnv -> DataScope -> ControlScope -> InJoin -> SimplM OutJoin
+simplJoin env dsc csc (Join xs comm)
   = do
     let (env', dsc', xs') = enterLamScopes env dsc xs
     comm' <- simplCommandNoFloats env' dsc' csc comm
@@ -712,7 +701,7 @@ simplDef env dsc csc top_lvl id new_pair def
       BoundToJoin { def_join = join, def_arity = arity
                   , def_src = src, def_guidance = guide }
         | isStableSource src
-        -> do { join' <- simplJoinNoFloats rule_env dsc csc join
+        -> do { join' <- simplJoin rule_env dsc csc join
               ; case guide of
                   UnfWhen {}
                      -> let guide' = guide { ug_boring_ok = joinInlineBoringOk join' }
