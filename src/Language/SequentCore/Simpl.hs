@@ -1994,6 +1994,19 @@ mkDupableKont env dsc csc ty kont
                                     let ty'  = funResultTy (termType (argInfoToTerm ai))
                                     (flts, mk') <- mkDupableKont env dsc csc ty' mk
                                     done (flts:fltss) fs' (Simplified OkToDup (retType csc, mk') Return)
+          StrictLet { mk_scope = (dsc', csc'), mk_binder = bndr, mk_command = comm }
+                                 -> do
+                                    let kontTy = mkKontTy (mkTupleTy UnboxedTuple [ty])
+                                    (env', j) <- mkFreshVar env (fsLit "*letj") kontTy
+                                    let (env_rhs, dsc_rhs, bndr') = enterTermScope env' dsc' bndr
+                                        csc_rhs = csc'
+                                        join_rhs = Join [bndr'] comm
+                                    (flts, env_kont, csc_kont) <- simplJoinBind env_rhs dsc csc j dsc_rhs csc_rhs j join_rhs NonRecursive
+                                    let x = mkKontArgId ty
+                                    (flts', jump_comm) <- simplJump env_kont dsc_rhs csc_kont [Var x] j
+                                    let join_end = Simplified OkToDup (retType csc_kont, retKont csc_kont) $ Case x [Alt DEFAULT [] jump_comm]
+                                        mk' = SynKont { mk_frames = [], mk_end = join_end, mk_dup = OkToDup }
+                                    done (flts':flts:fltss) fs' (Simplified OkToDup (retType csc, mk') Return)
           _                      -> split env dsc csc fltss fs' ty [] (Simplified OkToDup (retType csc, mk) Return)
                                                                       (fsLit "*imkj")
     
