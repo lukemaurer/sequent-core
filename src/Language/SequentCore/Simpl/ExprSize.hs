@@ -117,10 +117,7 @@ sizeFuncs dflags !cap topArgs
     sizeT (Var x)        = sizeCall x [] 0
     sizeT (Compute _ comm) = sizeC comm
     sizeT (Lit lit)      = sizeN (litSize lit)
-    sizeT (Lam x body)   | isId x, not (isRealWorldId x)
-                         = lamScrutDiscount dflags (sizeT body `addSizeN` 10)
-                         | otherwise
-                         = sizeT body
+    sizeT (Lam x body)   = sizeT body `addLamBndrSize` x
     
     sizeK (fs, end)      = foldr addSizeNSD (sizeEnd end) (map sizeFrame fs)
 
@@ -184,6 +181,9 @@ sizeFuncs dflags !cap topArgs
     sizeAlts :: [SeqCoreAlt] -> BodySize
     sizeAlts alts = foldr (addAltSize . sizeAlt) sizeZero alts
 
+    -- We give a join point the same size as the corresponding
+    -- lambda-abstraction. Conceivably, we could give join points credit for not
+    -- causing allocation, but then we might want to re-tune. TODO: Experiment.
     sizeBind :: SeqCoreBind -> BodySize
     sizeBind (NonRec (BindTerm x rhs))
       = sizeT rhs `addSizeN` allocSize
@@ -192,16 +192,16 @@ sizeFuncs dflags !cap topArgs
           -- An unlifted type has no heap allocation
           | isUnLiftedType (idType x) =  0
           | otherwise                 = 10
-    sizeBind (NonRec (BindJoin _p (Join _xs comm)))
-      = sizeC comm
+    sizeBind (NonRec (BindJoin _p (Join xs comm)))
+      = foldl addLamBndrSize (sizeC comm) xs
 
     sizeBind (Rec pairs)
       = foldr (addSizeNSD . pairSize) (sizeN allocSize) pairs
       where
-        allocSize                     = 10 * length (filter bindsTerm pairs)
+        allocSize                     = 10 * length pairs
         pairSize (BindTerm _x rhs)    = sizeT rhs
-        pairSize (BindJoin _p (Join _xs comm))
-                                      = sizeC comm
+        pairSize (BindJoin _p (Join xs comm))
+                                      = foldl addLamBndrSize (sizeC comm) xs
 
     sizeJump :: [SeqCoreArg] -> JoinId -> BodySize
     sizeJump args j
@@ -212,6 +212,13 @@ sizeFuncs dflags !cap topArgs
     addSizeN :: BodySize -> Int -> BodySize
     addSizeN TooBig            _ = TooBig
     addSizeN (BodySize b as r) d = mkBodySize cap (b + d) as r
+
+    -- Add a lambda (or a binder from a join point body)
+    addLamBndrSize :: BodySize -> SeqCoreBndr -> BodySize
+    addLamBndrSize size x | isId x, not (isRealWorldId x)
+                          = lamScrutDiscount dflags (size `addSizeN` 10)
+                          | otherwise
+                          = size
 
     -- How to combine the sizes of alternatives
     addAltSize :: BodySize -> BodySize -> BodySize
