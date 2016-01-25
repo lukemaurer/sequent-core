@@ -1093,7 +1093,7 @@ simplKont env (ai@ArgInfo { ai_strs = [] }) fs end
             (ppr ai $$ pprMultiScopedKont fs end)) $
     simplKont env (ai { ai_strs = [False] }) fs end
   where
-    trivialKont | null fs
+    trivialKont | all (isTrivialFrame . unScope) fs
                 , (_, csc, Return) <- openScopedEnd end
                 , Stop {} <- retKont csc
                 = True
