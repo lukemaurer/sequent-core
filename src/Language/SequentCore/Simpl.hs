@@ -310,15 +310,32 @@ simplLazyBind env dsc new_bndr dsc_rhs old_bndr term level recFlag
     in return (emptyFloats, env, extendCvSubst dsc old_bndr co')
   | otherwise
   = do
-    -- TODO Handle floating type lambdas
-    (flts, term') <- simplTerm env dsc_rhs RhsCtxt term
-    (flts', term'') <- prepareRhsTerm (env `augmentFromFloats` flts) level new_bndr term'
+    let   (tvs, body) = case collectTypeBinders term of
+                          (tvs, body) | not_lam body -> (tvs,body)
+                                      | otherwise    -> ([], term)
+          not_lam (Lam _ _) = False
+          not_lam _         = True
+                  -- Do not do the "abstract tyyvar" thing if there's
+                  -- a lambda inside, because it defeats eta-reduction
+                  --    f = /\a. \x. g a x
+                  -- should eta-reduce(flts, term') <- simplTerm env dsc_rhs RhsCtxt term
+          (env_body, dsc_body, tvs') = enterTermScopes env dsc_rhs tvs 
+    (flts, body') <- simplTerm env_body dsc_body RhsCtxt body
+    (flts', body'') <- prepareRhsTerm (env `augmentFromFloats` flts) level new_bndr body'
     let flts_all = flts `addFloats` flts'
     (flts_out, env_x', term_final)
-      <- if not (doFloatFromRhs level recFlag False term'' flts_all)
-            then    return (emptyFloats, env, wrapFloatsAroundTerm flts_all term'')
-            else do tick LetFloatFromLet
-                    return (flts_all, env `augmentFromFloats` flts_all, term'')
+      <- if | not (doFloatFromRhs level recFlag False body'' flts_all)
+              -> do term' <- mkLam True tvs' $ wrapFloatsAroundTerm flts_all body''
+                    return (emptyFloats, env, term')
+            | null tvs 
+              -> do tick LetFloatFromLet
+                    return (flts_all, env `augmentFromFloats` flts_all, body'')
+            | otherwise
+              -> do tick LetFloatFromLet
+                    (poly_binds, body''') <- abstractFloats tvs' env_body flts_all body''
+                    term' <- mkLam True tvs' body'''
+                    poly_flts <- addPolyBinds env dsc nullControlScope level poly_binds
+                    return (poly_flts, env `augmentFromFloats` poly_flts, term')
     addingFloats2 flts_out $ completeTermBind env_x' dsc old_bndr new_bndr term_final level
 
 {-
@@ -793,6 +810,16 @@ addPolyBind _env _dsc _csc _level bind@(Rec _)
   -- Be conservative like the original simplifier here; recursiveness is tricky
   -- (worst case is we cause extra iteration by not updating definitions now)
   = return $ unitFloat bind
+
+addPolyBinds :: SimplEnv -> DataScope -> ControlScope
+             -> TopLevelFlag -> [OutBind] -> SimplM Floats
+addPolyBinds _ _ _ _ []
+  = return emptyFloats
+addPolyBinds env dsc csc level (bind : binds)
+  = do
+    flts1 <- addPolyBind env dsc csc level bind
+    flts2 <- addPolyBinds (env `augmentFromFloats` flts1) dsc csc level binds
+    return $ flts1 `addFloats` flts2
 
 -----------------
 -- Expressions --
