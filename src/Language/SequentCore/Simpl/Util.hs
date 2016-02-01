@@ -21,10 +21,14 @@ module Language.SequentCore.Simpl.Util (
   mkCase, prepareAlts,
   
   -- * Lambda construction
-  mkLam
+  mkLam,
+  
+  -- * Floating
+  abstractFloats
 ) where
 
 import Language.SequentCore.Arity
+import Language.SequentCore.FVs
 import Language.SequentCore.Simpl.Env
 import Language.SequentCore.Simpl.Monad
 import Language.SequentCore.Syntax
@@ -39,18 +43,25 @@ import Demand
 import DynFlags
 import FastString
 import Id
+import MkCore      ( sortQuantVars )
+import MonadUtils  ( mapAccumLM )
+import Name        ( setNameUnique )
 import OptCoercion
 import Outputable
 import Pair
 import Rules
 import Type hiding ( substTy )
 import UniqSupply
-import Util        ( count, filterOut, lengthExceeds )
+import Util        ( count, debugIsOn, filterOut, lengthExceeds )
 import Var
 import VarSet
 
 import Control.Exception ( assert )
 import Control.Monad
+
+#define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
+#define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
+#define WARN( e, msg ) (warnPprTrace (e) __FILE__ __LINE__ (msg)) $
 
 -----------
 -- Flags --
@@ -772,6 +783,92 @@ mkLam inRhsCtxt bndrs body
       | otherwise
       = return (mkLambdas bndrs body)
 
+--------------
+-- Floating --
+--------------
+
+abstractFloats :: [OutTyVar] -> SimplEnv -> Floats -> OutTerm
+               -> SimplM ([OutBind], OutTerm)
+abstractFloats main_tvs env body_floats body
+  = ASSERT( not (isEmptyFloats body_floats) && all bindsTerm (flattenBinds body_float_binds) )
+      -- This is called on floats coming out of a term, so there should be no joins
+    do  { (ds, float_binds) <- mapAccumLM abstract empty_ds body_float_binds
+        ; return (float_binds, substTerm (text "abstractFloats1") env ds body) }
+  where
+    main_tv_set = mkVarSet main_tvs
+    empty_ds    = emptyDataScope
+    body_float_binds = getFloatBinds body_floats
+
+    abstract :: DataScope -> OutBind -> SimplM (DataScope, OutBind)
+    abstract ds (NonRec (BindTerm id rhs))
+      = do { (poly_id, poly_app) <- mk_poly tvs_here id
+           ; let poly_rhs = mkLambdas tvs_here rhs'
+                 ds'      = extendIdSubst ds id (Done poly_app)
+           ; return (ds', NonRec (BindTerm poly_id poly_rhs)) }
+      where
+        rhs' = substTerm (text "abstractFloats2") env ds rhs
+        tvs_here = varSetElemsKvsFirst (main_tv_set `intersectVarSet` someFreeVars isTyVar rhs')
+
+                -- Abstract only over the type variables free in the rhs
+                -- wrt which the new binding is abstracted.  But the naive
+                -- approach of abstract wrt the tyvars free in the Id's type
+                -- fails. Consider:
+                --      /\ a b -> let t :: (a,b) = (e1, e2)
+                --                    x :: a     = fst t
+                --                in ...
+                -- Here, b isn't free in x's type, but we must nevertheless
+                -- abstract wrt b as well, because t's type mentions b.
+                -- Since t is floated too, we'd end up with the bogus:
+                --      poly_t = /\ a b -> (e1, e2)
+                --      poly_x = /\ a   -> fst (poly_t a *b*)
+                -- So for now we adopt the even more naive approach of
+                -- abstracting wrt *all* the tyvars.  We'll see if that
+                -- gives rise to problems.   SLPJ June 98
+
+    abstract ds (Rec prs)
+       = do { (poly_ids, poly_apps) <- mapAndUnzipM (mk_poly tvs_here) ids
+            ; let ds' = foldl (\ds (i, a) -> extendIdSubst ds i (Done a)) ds (ids `zip` poly_apps)
+                  poly_rhss = [mkLambdas tvs_here (substTerm (text "abstractFloats4") env ds' rhs)
+                              | rhs <- rhss]
+            ; return (ds', Rec (zipWith BindTerm poly_ids poly_rhss)) }
+       where
+         (ids,rhss) = unzip [(id, rhs) | BindTerm id rhs <- prs]
+                -- For a recursive group, it's a bit of a pain to work out the minimal
+                -- set of tyvars over which to abstract:
+                --      /\ a b c.  let x = ...a... in
+                --                 letrec { p = ...x...q...
+                --                          q = .....p...b... } in
+                --                 ...
+                -- Since 'x' is abstracted over 'a', the {p,q} group must be abstracted
+                -- over 'a' (because x is replaced by (poly_x a)) as well as 'b'.
+                -- Since it's a pain, we just use the whole set, which is always safe
+                --
+                -- If you ever want to be more selective, remember this bizarre case too:
+                --      x::a = x
+                -- Here, we must abstract 'x' over 'a'.
+         tvs_here = sortQuantVars main_tvs
+
+    abstract _ _ = panic "abstract"
+
+    mk_poly tvs_here var
+      = do { uniq <- getUniqueM
+           ; let  poly_name = setNameUnique (idName var) uniq           -- Keep same name
+                  poly_ty   = mkForAllTys tvs_here (idType var) -- But new type of course
+                  poly_id   = transferPolyIdInfo var tvs_here $ -- Note [transferPolyIdInfo] in Id.lhs
+                              mkLocalId poly_name poly_ty
+           ; return (poly_id, mkAppTerm (Var poly_id) (map Type (mkTyVarTys tvs_here))) }
+                -- In the olden days, it was crucial to copy the occInfo of the original var,
+                -- because we were looking at occurrence-analysed but as yet unsimplified code!
+                -- In particular, we mustn't lose the loop breakers.  BUT NOW we are looking
+                -- at already simplified code, so it doesn't matter
+                --
+                -- It's even right to retain single-occurrence or dead-var info:
+                -- Suppose we started with  /\a -> let x = E in B
+                -- where x occurs once in B. Then we transform to:
+                --      let x' = /\a -> E in /\a -> let x* = x' a in B
+                -- where x* has an INLINE prag on it.  Now, once x* is inlined,
+                -- the occurrences of x' will be just the occurrences originally
+                -- pinned on x.
 ---------------
 -- Instances --
 ---------------
