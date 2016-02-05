@@ -177,7 +177,7 @@ joinToCoreExpr' :: RecFlag -> Type -> SeqCoreJoin -> Core.CoreExpr
 joinToCoreExpr' recFlag retTy (Join xs comm)
   = Core.mkCoreLams (maybeOneShots xs') (commandToCoreExpr retTy comm)
   where
-    xs'   | null xs   = [ voidArgId ]
+    xs'   | null xs   = [ voidArgId `setIdOccInfo` IAmDead ]
           | otherwise = xs
     maybeOneShots xs | isNonRec recFlag = map setOneShotLambdaIfId xs
                      | otherwise        = xs
