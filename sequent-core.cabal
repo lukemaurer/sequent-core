@@ -121,6 +121,19 @@ executable ContExpl
   if !flag(examples)
     buildable:         False
 
+executable FullContExpl
+  hs-source-dirs:      examples
+  Main-is:             FullContification.hs
+  build-depends:       base >= 4 && < 5, sequent-core
+  default-language:    Haskell2010
+  ghc-options:         -O0
+                       -fplugin=SequentCore
+                       -fplugin-opt=SequentCore:-fseq-contification
+                       -fplugin=Language.SequentCore.Dump
+                       -fplugin-opt=Language.SequentCore.Dump:end
+  if !flag(examples)
+    buildable:         False
+
 executable StrictnessExpl
   hs-source-dirs:      examples
   Main-is:             Strictness.hs
