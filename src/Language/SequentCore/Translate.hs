@@ -11,6 +11,7 @@
 module Language.SequentCore.Translate (
   -- $txn
   fromCoreModule, termFromCoreExpr,
+  fromCoreModuleNoContify, termFromCoreExprNoContify,
   bindsToCore,
   commandToCoreExpr, termToCoreExpr, joinToCoreExpr, joinToCoreExpr', joinIdToCore,
   CoreContext, kontToCoreExpr,
@@ -39,7 +40,7 @@ import Util       ( lengthExceeds )
 -- inverses. However, any differences between @e@ and @commandToCoreExpr
 -- (fromCoreExpr e)@ should be operationally insignificant, such as a @let@
 -- floating out from a function being applied. A more precise characterization
--- of the indended invariants of these functions would entail some sort of
+-- of the intended invariants of these functions would entail some sort of
 -- /bisimulation/, but it should suffice to know that the translations are
 -- "faithful enough."
 
@@ -51,9 +52,19 @@ import Util       ( lengthExceeds )
 fromCoreModule :: [Core.CoreBind] -> [SeqCoreBind]
 fromCoreModule = runContifyGently . fromCoreTopLevelBinds
 
+-- | Translates a list of Core bindings into Sequent Core, skipping the
+-- contification pass (see "Language.SequentCore.Contify"). 
+fromCoreModuleNoContify :: [Core.CoreBind] -> [SeqCoreBind]
+fromCoreModuleNoContify = fromCoreTopLevelBinds
+
 -- | Translates a single Core expression as a Sequent Core term.
 termFromCoreExpr :: Core.CoreExpr -> SeqCoreTerm
 termFromCoreExpr = contifyGentlyInTerm . fromCoreExprAsTerm
+
+-- | Translates a single Core expression as a Sequent Core term, skipping the
+-- contification pass (see "Language.SequentCore.Contify").
+termFromCoreExprNoContify :: Core.CoreExpr -> SeqCoreTerm
+termFromCoreExprNoContify = fromCoreExprAsTerm
 
 fromCoreExpr :: Core.CoreExpr -> SeqCoreKont -> SeqCoreCommand
 fromCoreExpr expr (fs, end) = go [] expr fs end

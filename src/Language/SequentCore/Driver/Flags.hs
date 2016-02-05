@@ -1,6 +1,6 @@
 module Language.SequentCore.Driver.Flags (
   SeqFlags(..), SeqDumpFlag(..), SeqGeneralFlag(..),
-  FloatOutSwitches(..), FinalPassSwitches(..),
+  FloatOutSwitches(..), FinalPassSwitches(..), ContifySwitches(..),
   
   sgopt, sgopt_set, sgopt_unset,
   sdopt, sdopt_set, sdopt_unset,
@@ -40,9 +40,12 @@ data SeqGeneralFlag
   = Opt_EnableSeqSimpl      -- ^ Use Sequent Core simplifier (Language.SequentCore.Simpl)
   | Opt_EnableSeqFloatOut   -- ^ Use Sequent Core implementation of Float Out (Language.SequentCore.FloatOut)
   | Opt_EnableSeqSpecConstr -- ^ Use Sequent Core implementation of SpecConstr (Language.SequentCore.SpecConstr)
+  | Opt_EnableContify       -- ^ Use contification pass (aggressive mode)
   
   | Opt_CombineSeqPasses    -- ^ Avoid churning between Core and Sequent Core
                             -- TODO Contify more often so that there is nothing to gain by going back and forth
+  | Opt_ContifyBetweenSeqPasses -- ^ Contify (gently) between consecutive Sequent Core passes
+  | Opt_Contify_Simpl       -- ^ Run (Sequent Core) simplifier after full contification 
   
   | Opt_ProtectLastValArg
   | Opt_IgnoreRealWorld
@@ -161,8 +164,11 @@ sFlags = [
   ( "seq-simpl",                 Opt_EnableSeqSimpl, nop),
   ( "seq-full-laziness",         Opt_EnableSeqFloatOut, nop),
   ( "seq-spec-constr",           Opt_EnableSeqSpecConstr, nop),
+  ( "seq-contification",         Opt_EnableContify, nop),
   
   ( "seq-combine-passes",        Opt_CombineSeqPasses, nop),
+  ( "seq-contify-between",       Opt_ContifyBetweenSeqPasses, nop),
+  ( "seq-contification-simpl",   Opt_Contify_Simpl, nop),
   
   ( "llf",                       Opt_LLF, nop),
   ( "llf-abstract-undersat",     Opt_LLF_AbsUnsat, nop),
@@ -276,3 +282,15 @@ pprFinalPassSwitches sw = sep $ punctuate comma $
   , ptext (sLit "ClosureGrowthInLam =") <+> ppr (fps_cloGrowthInLam sw)
   , ptext (sLit "StabilizeFirst =") <+> ppr (fps_stabilizeFirst sw)
   ]
+
+data ContifySwitches = ContifySwitches {
+  cs_gentle :: Bool
+  -- ^ True <=> minimal effort, as happens automatically after translation
+}
+
+instance Outputable ContifySwitches where
+  ppr = pprContifySwitches
+
+pprContifySwitches :: ContifySwitches -> SDoc
+pprContifySwitches sw
+  = text "ContifySwitches" <+> braces (text "Gentle =" <+> ppr (cs_gentle sw))
