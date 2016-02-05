@@ -1253,7 +1253,7 @@ wouldIncreaseRuntime env abs_ids binding_group_vus
   where
     bad_id abs_id
       | isJoinId abs_id
-      = True               -- *Cannot* abstract over join id (and wouldn't want to)
+      = True               -- We *cannot* abstract over join id (and wouldn't want to)
       | idArity abs_id > 0 -- NB (arity > 0) iff "is known function"
                            -- FIXME This is not true under CallArity! Should
                            -- remember which binders are let-bound to functions
