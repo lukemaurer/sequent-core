@@ -3,7 +3,7 @@
 module Main where
 
 import GHC.Exts
-{-
+
 -- Obvious case for contification.
 case1_yes :: () -> Int#
 case1_yes ()
@@ -93,7 +93,6 @@ case9_yes x
         {-# NOINLINE h #-}
         h y = if y == 0 then 0 else k (y-1)
     in k x
--}
 
 -- Can float recursive groups inward
 case10_yes :: Int -> Int
@@ -106,7 +105,6 @@ case10_yes x
         h y = if y == 0 then False else k (y-1)
     in if k x then 1 else 0
 
-{-
 -- Don't wreck sharing by floating a thunk inward
 case11_no :: Int -> Int
 case11_no x
@@ -117,6 +115,6 @@ case11_no x
         f 0 = 1
         f z = f (z-1) * y -- Could float into argument and contify (but shouldn't!)
     in f x
--}
+
 main :: IO ()
 main = return ()
