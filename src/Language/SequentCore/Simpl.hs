@@ -627,19 +627,19 @@ completeBind env dsc csc x pair level
       _                        -> return (unitFloat (NonRec pair), env, dsc, csc)
   | otherwise
   = do
-    (newArity, v') <- tryEtaExpandRhs env pair
+    (newArity, pair') <- tryEtaExpandRhs env pair
     let oldDef = findRealDef env x
-    newDef <- simplDef env dsc csc level x v' oldDef
-    postInline <- postInlineUnconditionally env pair level newDef
+    newDef <- simplDef env dsc csc level x pair' oldDef
+    postInline <- postInlineUnconditionally env pair' level newDef
     if postInline
       then do
         tick (PostInlineUnconditionally x)
         -- We were going to rename x, but we're substituting intead, so throw
         -- out the new binder
-        let (dsc', csc') = extendSubstWithOutBindPair dsc csc (pair `setPairBinder` x)
+        let (dsc', csc') = extendSubstWithOutBindPair dsc csc (pair' `setPairBinder` x)
         return (emptyFloats, env, dsc', csc')
       else do
-        let x' = binderOfPair pair
+        let x' = binderOfPair pair'
             info1 = idInfo x' `setArityInfo` newArity
             (env', x'') = setDef env (x' `setIdInfo` info1) newDef
             info2 = idInfo x''
@@ -657,7 +657,7 @@ completeBind env dsc csc x pair level
             x_final = x'' `setIdInfo` info3
         
         when tracing $ liftCoreM $ putMsg (text "defined" <+> ppr x_final <+> equals <+> ppr newDef)
-        return (unitFloat (NonRec (pair `setPairBinder` x_final)), env', dsc, csc)
+        return (unitFloat (NonRec (pair' `setPairBinder` x_final)), env', dsc, csc)
 
 completeTermBind :: SimplEnv -> DataScope -> InVar -> OutVar -> OutTerm
                  -> TopLevelFlag -> SimplM (Floats, SimplEnv, DataScope)
