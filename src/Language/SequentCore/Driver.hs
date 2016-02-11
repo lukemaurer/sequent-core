@@ -92,7 +92,7 @@ xlateFloatOutSwitches fos
 
 installNewPasses :: DynFlags -> SeqFlags -> [SeqCoreToDo] -> [SeqCoreToDo]
 installNewPasses dflags sflags todos
-  = todos ++ [contify, lateLambdaLift]
+  = todos ++ [contify, lateLambdaLift, coreSimplAtEnd, seqSimplAtEnd]
   where
     contify
       = runWhen (sgopt Opt_EnableContify sflags) $
@@ -118,6 +118,14 @@ installNewPasses dflags sflags todos
     simplAfterLateLambdaLift
       = runWhen (sgopt SeqFlags.Opt_LLF_Simpl sflags) $
           simpl_phase 0 ["post-late-lam-lift"] max_iter
+    
+    coreSimplAtEnd
+      = runWhen (sgopt SeqFlags.Opt_CoreSimplAtEnd sflags) $
+          simpl_phase_with coreDoSimplify 0 ["post-final"] max_iter
+    
+    seqSimplAtEnd
+      = runWhen (sgopt SeqFlags.Opt_SeqSimplAtEnd sflags) $
+          simpl_phase_with SeqCoreDoSimplify 0 ["post-final"] max_iter
     
     switchesForFinal = FloatOutSwitches
       { floatOutLambdas             = SeqFlags.lateFloatNonRecLam sflags
@@ -193,7 +201,9 @@ installNewPasses dflags sflags todos
     
     mkSimplifyPass iters mode
       | sgopt Opt_EnableSeqSimpl sflags = SeqCoreDoSimplify iters mode
-      | otherwise                       = SeqCoreDoCore (CoreDoSimplify iters mode)                        
+      | otherwise                       = coreDoSimplify    iters mode
+    
+    coreDoSimplify iters mode = SeqCoreDoCore (CoreDoSimplify iters mode)
     
     runWhen cond todo | cond      = todo
                       | otherwise = SeqCoreDoNothing

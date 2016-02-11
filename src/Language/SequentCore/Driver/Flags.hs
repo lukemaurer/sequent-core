@@ -48,6 +48,9 @@ data SeqGeneralFlag
   | Opt_ContifyBetweenSeqPasses -- ^ Contify (gently) between consecutive Sequent Core passes
   | Opt_Contify_Simpl       -- ^ Run (Sequent Core) simplifier after full contification 
   
+  | Opt_CoreSimplAtEnd      -- ^ Run the original simplifier at the very end of the pipeline
+  | Opt_SeqSimplAtEnd       -- ^ Run the Sequent Core simplifier at the very end of the pipeline
+  
   | Opt_ProtectLastValArg
   | Opt_IgnoreRealWorld
   | Opt_FloatNullaryJoins   -- ^ Always allowed to float a nullary join point
@@ -171,6 +174,9 @@ sFlags = [
   ( "seq-combine-passes",        Opt_CombineSeqPasses, nop),
   ( "seq-contify-between",       Opt_ContifyBetweenSeqPasses, nop),
   ( "seq-contification-simpl",   Opt_Contify_Simpl, nop),
+  
+  ( "seq-core-simpl-at-end",     Opt_CoreSimplAtEnd, nop),
+  ( "seq-simpl-at-end",          Opt_SeqSimplAtEnd, nop),
   
   ( "llf",                       Opt_LLF, nop),
   ( "llf-abstract-undersat",     Opt_LLF_AbsUnsat, nop),
