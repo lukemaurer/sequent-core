@@ -34,6 +34,7 @@ data SeqDumpFlag
   = Opt_D_dump_llf
   | Opt_D_dump_seq_xlate
   | Opt_D_dump_seq_pipeline
+  | Opt_D_dump_cfy_stats
   deriving (Eq, Ord, Enum)
 
 data SeqGeneralFlag
@@ -117,6 +118,7 @@ seqFlags = [
     Flag "ddump-llf"                     (setDumpFlag Opt_D_dump_llf)
   , Flag "ddump-seq-xlate"               (setDumpFlag Opt_D_dump_seq_xlate)
   , Flag "ddump-seq-pipeline"            (setDumpFlag Opt_D_dump_seq_pipeline)
+  , Flag "ddump-cfy-stats"               (setDumpFlag Opt_D_dump_cfy_stats)
                   
   , Flag "fllf-nonrec-lam-limit"         (intSuffix (\n f -> f{ lateFloatNonRecLam = Just n }))
   , Flag "fllf-nonrec-lam-any"           (noArg       (\f -> f{ lateFloatNonRecLam = Nothing }))

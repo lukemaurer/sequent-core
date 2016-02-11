@@ -21,16 +21,20 @@ import GhcPlugins ( Plugin(installCoreToDos), CommandLineOption
                   , defaultPlugin
                   , reinitializeGlobals
                   , CoreM, CoreToDo(CoreDoPluginPass)
-                  , putMsg
+                  , errorMsg, putMsg
                   )
 
+import Language.SequentCore.Driver.Flags
 import Language.SequentCore.Lint
 import Language.SequentCore.Syntax
 import Language.SequentCore.Plugin
 import Language.SequentCore.Pretty (pprTopLevelBinds)
 
 import Outputable ( pprPanic
-                  , withPprStyle, defaultUserStyle )
+                  , withPprStyle, defaultUserStyle
+                  , vcat, text )
+
+import Control.Monad ( unless )
 
 -- | The plugin. A GHC plugin is a module that exports a value called @plugin@
 -- with the type 'Plugin'.
@@ -42,13 +46,15 @@ plugin = defaultPlugin {
 install :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 install opts todos =
   do reinitializeGlobals
-     return $ case opts of
+     (sflags, leftovers, warns) <- parseSeqFlags (concatMap words opts)
+     unless (null warns) $
+       errorMsg $ vcat (map text warns)
+     let newPass  = CoreDoPluginPass "sequent-core-dump" passFunc
+         passFunc = sequentPassWithFlags sflags showSequentCore
+     return $ case leftovers of
                 ["end"]  -> todos ++ [newPass]
                 ["both"] -> newPass : todos ++ [newPass]
                 _        -> newPass : todos
-  where
-    newPass  = CoreDoPluginPass "sequent-core-dump" passFunc
-    passFunc = sequentPass showSequentCore
 
 showSequentCore :: [SeqCoreBind] -> CoreM [SeqCoreBind]
 showSequentCore bs = do

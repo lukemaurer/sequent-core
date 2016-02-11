@@ -1,5 +1,6 @@
-{-# LANGUAGE BangPatterns, CPP, LambdaCase, MultiWayIf, ParallelListComp,
-             TupleSections, ViewPatterns #-}
+{-# LANGUAGE BangPatterns, CPP, FlexibleInstances, LambdaCase, MultiWayIf,
+             ParallelListComp, TupleSections, TypeSynonymInstances,
+             ViewPatterns #-}
 
 -- | 
 -- Module      : Language.SequentCore.Contify
@@ -10,7 +11,9 @@
 -- Pass that turns as many functions as possible into join points.
 
 module Language.SequentCore.Contify (
-  runContify, runContifyGently, contifyInTerm, contifyGentlyInTerm
+  runContify, runContifyGently,
+  contifyInProgram, contifyGentlyInProgram, contifyInProgramWith,
+  contifyInTerm, contifyGentlyInTerm
 ) where
 
 import {-# SOURCE #-} Language.SequentCore.Translate
@@ -22,11 +25,15 @@ import Language.SequentCore.Syntax.Util
 import Language.SequentCore.Util
 import Language.SequentCore.WiredIn
 
-import BasicTypes ( Arity, TupleSort(..) )
+import BasicTypes ( Arity, TopLevelFlag(..), TupleSort(..)
+                  , isTopLevel, isNotTopLevel )
 import Bag
+import CoreMonad
 import CoreSubst
 import CoreUnfold
 import qualified CoreSyn as Core
+import DynFlags
+import qualified ErrUtils as Err
 import FastString
 import Id
 import IdInfo
@@ -34,6 +41,7 @@ import Maybes
 import MkId
 import Outputable hiding ( (<>) )
 import qualified Outputable as Out
+import SrcLoc     ( noSrcSpan )
 import Type hiding ( substTy )
 import TysPrim
 import TysWiredIn
@@ -47,12 +55,14 @@ import Control.Applicative
 import Control.Exception    ( assert )
 import Control.Monad
 import Control.Monad.Fix
+import Control.Monad.Trans.Writer.Strict
 import Data.IntMap          ( IntMap )
 import qualified Data.IntMap as IntMap
 import Data.IntSet          ( IntSet )
 import qualified Data.IntSet as IntSet
 import Data.List
 import Data.Monoid
+import Numeric
 
 #define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
 #define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
@@ -65,9 +75,21 @@ tracing = False
 dumping :: Bool
 dumping = False
 
-runContify :: ContifySwitches -> SeqCoreProgram -> SeqCoreProgram
-runContify sw = cfyInTopLevelBinds sw . escAnalProgram sw . uniquifyProgram
-
+runContify :: SeqFlags -> ContifySwitches -> SeqCoreProgram -> CoreM SeqCoreProgram
+runContify sflags sw pgm
+  = do
+    let pgm_uniqd       = uniquifyProgram pgm
+        (cst1, pgm_esc) = escAnalProgram sw pgm_uniqd
+        (cst2, pgm')    = cfyInTopLevelBinds sw pgm_esc
+        cst             = cst1 <> cst2
+        
+    dflags <- getDynFlags
+    when (sdopt Opt_D_dump_cfy_stats sflags) $ liftIO $
+        log_action dflags dflags Err.SevInfo noSrcSpan defaultDumpStyle $
+          vcat [ blankLine, text "Contification statistics:", blankLine, ppr cst ]
+    
+    return pgm'
+          
 -- | Run contification in gentle mode, as used automatically after translation.
 -- 'Language.SequentCore.Translate.fromCoreModule' operates by translating
 -- straightforwardly, with no functions converted to join points, then calling
@@ -80,17 +102,65 @@ runContify sw = cfyInTopLevelBinds sw . escAnalProgram sw . uniquifyProgram
 -- In contrast, gentle mode only contifies in place, and thus should be safe to
 -- run regularly. Any pass that may cause more bindings to be contifiable may
 -- benefit from running a gentle Contify pass afterward.
-runContifyGently :: SeqCoreProgram -> SeqCoreProgram
-runContifyGently = cfyInTopLevelBinds gentleMode . escAnalProgram gentleMode . uniquifyProgram
+runContifyGently :: SeqFlags -> SeqCoreProgram -> CoreM SeqCoreProgram
+runContifyGently sflags = runContify sflags gentleMode
   -- FIXME uniquifyProgram probably not necessary in gentle mode but hides bugs
 
+contifyInProgram, contifyGentlyInProgram :: SeqCoreProgram -> SeqCoreProgram 
+contifyInProgram       = contifyInProgramWith aggressiveMode
+contifyGentlyInProgram = contifyInProgramWith gentleMode
+
+contifyInProgramWith :: ContifySwitches -> SeqCoreProgram -> SeqCoreProgram
+contifyInProgramWith sw pgm = snd $ cfyInTopLevelBinds sw $ snd $ escAnalProgram sw $ uniquifyProgram pgm
+
 contifyInTerm, contifyGentlyInTerm :: SeqCoreTerm -> SeqCoreTerm
-contifyInTerm term = cfyInTerm env (runEscM aggressiveMode $ escAnalTerm $ uniquifyTerm term)
+contifyInTerm       = contifyInTermWith aggressiveMode
+contifyGentlyInTerm = contifyInTermWith gentleMode
+
+contifyInTermWith :: ContifySwitches -> SeqCoreTerm -> SeqCoreTerm
+contifyInTermWith sw term = snd $ runCfyM $ cfyInTerm env $ snd $ runEscM sw $ escAnalTerm $ uniquifyTerm term
   where
-    env = initCfyEnvForTerm aggressiveMode term
-contifyGentlyInTerm term = cfyInTerm env (runEscM gentleMode $ escAnalTerm term)
-  where
-    env = initCfyEnvForTerm gentleMode term
+    env = initCfyEnvForTerm sw term
+
+----------------
+-- Statistics --
+----------------
+
+data CfyStats = CfyStats { cst_bindsTotal    :: !Int
+                         , cst_bindsCfied    :: !Int
+                         , cst_bindsFloated  :: !Int
+                         , cst_bindsNotCfied :: !Int
+                         , cst_joinBinds     :: !Int
+                         , cst_scopeMismatch :: !Int
+                         , cst_arityMismatch :: !Int
+                         , cst_etaExpanded   :: !Int
+                         , cst_splitLams     :: !Int
+                         , cst_typeFixed     :: !Int
+                         , cst_polyFail      :: !Int
+                         , cst_dontCfyRules  :: !Int }
+              | ZeroCfyStats
+
+emptyCfyStats :: CfyStats
+emptyCfyStats = CfyStats 0 0 0 0 0 0 0 0 0 0 0 0
+
+scaleCfyStats :: Int -> CfyStats -> CfyStats
+scaleCfyStats _ ZeroCfyStats = ZeroCfyStats
+scaleCfyStats n (CfyStats s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12)
+  = CfyStats (n * s1) (n * s2) (n * s3) (n * s4)  (n * s5)  (n * s6)
+             (n * s7) (n * s8) (n * s9) (n * s10) (n * s11) (n * s12)
+
+instance Monoid CfyStats where
+  mempty = ZeroCfyStats
+  
+  ZeroCfyStats `mappend` cst = cst
+  cst `mappend` ZeroCfyStats = cst
+  CfyStats s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 `mappend`
+    CfyStats t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12
+    = CfyStats (s1 + t1) (s2 + t2) (s3 + t3) (s4 + t4) (s5 + t5) (s6 + t6)
+               (s7 + t7) (s8 + t8) (s9 + t9) (s10 + t10) (s11 + t11) (s12 + t12)
+
+class (Monad m) => MonadCfyStats m where
+  writeStats :: CfyStats -> m ()
 
 ----------------------------------
 -- Phase 1: Escape-analyse code --
@@ -482,7 +552,8 @@ checkEscaping :: EscapeAnalysis -- ^ The escape analysis to query.
                                 --   necessary for contification (aggressive mode).
               -> KontIdSet      -- ^ The inside scopes. Empty for non-recursive
                                 --   binding.
-              -> Occs           -- ^ `Abs` if no calls; `Esc` if any escaping
+              -> (CfyStats,
+                  Occs)         -- ^ `Abs` if no calls; `Esc` if any escaping
                                 --   calls; `NonEsc call` if only non-escaping
                                 --   calls.
 checkEscaping ea x outside allowFloat insides
@@ -498,17 +569,18 @@ checkEscaping ea x outside allowFloat insides
     states = ea_kstates ea
     answer = case lookupVarEnv (ea_calls ea) x of
                Just cis -> go Inside Nothing (bagToList cis)
-               Nothing   | x `elemVarSet` ea_allVars ea -> Esc
-                         | otherwise                    -> Abs
+               Nothing   | x `elemVarSet` ea_allVars ea -> (scopeMismatch, Esc)
+                         | otherwise                    -> (ZeroCfyStats, Abs)
     
     go _      Nothing    []         = pprPanic "checkEscaping" $ ppr ea $$ ppr x
                                         -- shouldn't be any empty bags
-    go region (Just ci)  []         = NonEsc ci region
-    go _      _          (ci:_)     | not (okScope ci)        = Esc
+    go region (Just ci)  []         = (ZeroCfyStats, NonEsc ci region)
+    go _      _          (ci:_)     | not (okScope ci)        = (scopeMismatch, Esc)
     go _      Nothing    (ci:cis)   = go region (Just ci) cis
       where
         region = locateCallIn states (ci_kontId ci) outside insides
-    go region1 (Just ci1) (ci2:cis) | not (ci1 `matches` ci2) = Esc
+    go region1 (Just ci1) (ci2:cis) | let (cst, matching) = ci1 `matches` ci2
+                                    , not matching            = (cst, Esc)
                                     | otherwise               = go region' (Just ci') cis
       where
         (region', ci') | region1 == Inside, region2 /= Inside = (region2, ci2)
@@ -539,25 +611,36 @@ checkEscaping ea x outside allowFloat insides
              text "Escape analysis:" <+> ppr ea)
         False
     
-    ci1 `matches` ci2 = ci_arity ci1 == ci_arity ci2 &&
-                        (ci_kontId ci1 == ci_kontId ci2 ||
-                         ci_kontId ci1 `IntSet.member` insides ||
-                         ci_kontId ci2 `IntSet.member` insides)
+    ci1 `matches` ci2 | ci_arity ci1 /= ci_arity ci2
+                      = (arityMismatch, False)
+                      | ci_kontId ci1 == ci_kontId ci2 ||
+                        ci_kontId ci1 `IntSet.member` insides ||
+                        ci_kontId ci2 `IntSet.member` insides
+                      = (ZeroCfyStats, True)
+                      | otherwise
+                      = (scopeMismatch, False)
 
+    scopeMismatch = emptyCfyStats { cst_scopeMismatch = 1 }
+    arityMismatch = emptyCfyStats { cst_arityMismatch = 1 }
 -- If none of the variables escape, return the list of variables that occur,
 -- along with their apparent arities and call lists, and the scope to float to,
 -- if any
 checkEscapingRec :: EscapeAnalysis -> [Id] -> KontId -> Bool -> KontIdSet
-                 -> Maybe ([(Id, Maybe CallInfo)], Maybe KontId)
+                 -> (CfyStats, Maybe ([(Id, Maybe CallInfo)], Maybe KontId))
 checkEscapingRec ea xs outside allowFloat insides
-  = do
-    pairs <- forM xs $ \x -> case checkEscaping ea x outside allowFloat insides of
-               NonEsc ci region -> Just (x, Just (ci, region))
-               Esc              -> Nothing
-               Abs              -> Just (x, Nothing)
-    tgtKontId <- findTgtKontId pairs
-    return ( [ (x, fst <$> maybe_ci_region) | (x, maybe_ci_region) <- pairs]
-           , tgtKontId )
+  = let (csts, mb_pairs)
+          = unzip $ flip map xs $ \x ->
+              let (cst, occs) = checkEscaping ea x outside allowFloat insides
+              in (cst,) $ case occs of
+                NonEsc ci region -> Just (x, Just (ci, region))
+                Esc              -> Nothing
+                Abs              -> Just (x, Nothing)
+    in case sequence mb_pairs of
+      Just pairs  | Just tgtKontId <- findTgtKontId pairs
+                 -> ( mconcat csts
+                    , Just ( [ (x, fst <$> maybe_ci_region) | (x, maybe_ci_region) <- pairs]
+                           , tgtKontId ) )
+      _          -> (mconcat (map markAsScopeMismatch csts), Nothing)
   where
     findTgtKontId []
       = Nothing -- no outside calls; can't contify (but dead anyway)
@@ -569,6 +652,9 @@ checkEscapingRec ea xs outside allowFloat insides
           Outside     -> Just Nothing -- Contify but don't float
           DeepOutside -> Just (Just (ci_kontId ci))
           Barred      -> pprPanic "checkEscapingRec" $ ppr ci
+  
+    markAsScopeMismatch ZeroCfyStats = emptyCfyStats { cst_scopeMismatch = 1 }
+    markAsScopeMismatch other        = other
 
 instance Monoid EscapeAnalysis where
   mempty = emptyEscapeAnalysis
@@ -657,43 +743,41 @@ locateCallIn states kontId outside insides
 
 -- | The monad underlying the escape analysis.
 newtype EscM a = EscM { unEscM :: EscEnv -> EscState
-                               -> (Maybe EscapeAnalysis, EscState, a) }
+                               -> (Maybe EscapeAnalysis, CfyStats, EscState, a) }
 
 instance Monad EscM where
   {-# INLINE return #-}
-  return x = EscM $ \_env st -> (Nothing, st, x)
+  return x = EscM $ \_env st -> (Nothing, mempty, st, x)
   
   {-# INLINE (>>=) #-}
   m >>= k  = EscM $ \env st ->
-               let !(escs1, st1, x) = unEscM m env st
-                   !(escs2, st2, y) = unEscM (k x) env st1
-                   escs             = case escs1 of
-                                        Nothing -> escs2
-                                        Just e1 ->
-                                          case escs2 of Nothing -> escs1
-                                                        Just e2 -> Just (e1 <> e2)
-               in (escs, st2, y)
+               let !(escs1, cst1, st1, x) = unEscM m env st
+                   !(escs2, cst2, st2, y) = unEscM (k x) env st1
+               in (escs1 <> escs2, cst1 <> cst2, st2, y)      
 
 instance Functor EscM where fmap = liftM
 instance Applicative EscM where { pure = return; (<*>) = ap }
 
 instance MonadFix EscM where
   mfix f = EscM $ \env st ->
-             let tup@(_, _, ans) = unEscM (f ans) env st
+             let tup@(_, _, _, ans) = unEscM (f ans) env st
              in tup
 
-runEscM :: ContifySwitches -> EscM a -> a
+instance MonadCfyStats EscM where
+  writeStats cst = EscM $ \_env st -> (Nothing, cst, st, ()) 
+
+runEscM :: ContifySwitches -> EscM a -> (CfyStats, a)
 runEscM = runEscMWith 0
 
-runEscMWith :: KontIdSupply -> ContifySwitches -> EscM a -> a
-runEscMWith kids mode m = case unEscM m env st of (_, _, a) -> a
+runEscMWith :: KontIdSupply -> ContifySwitches -> EscM a -> (CfyStats, a)
+runEscMWith kids mode m = case unEscM m env st of (_, cst, _, a) -> (cst, a)
   where env = emptyEscEnv mode
         st  = initState kids
 
 -- Monad operations --
 
 getEnv :: EscM EscEnv
-getEnv = EscM $ \env st -> (Nothing, st, env)
+getEnv = EscM $ \env st -> (Nothing, mempty, st, env)
 
 getMode :: EscM ContifySwitches
 getMode = ee_mode <$> getEnv
@@ -725,12 +809,12 @@ reportCall x call = do
 captureAnalysis, readAnalysis :: EscM a -> EscM (EscapeAnalysis, a)
 captureAnalysis m
   = EscM $ \env st ->
-             let !(escs, st', ans) = unEscM m env st
-             in (Nothing, st', (escs `orElse` emptyEscapeAnalysis, ans))
+             let !(escs, cst, st', ans) = unEscM m env st
+             in (Nothing, cst, st', (escs `orElse` emptyEscapeAnalysis, ans))
 readAnalysis m
   = EscM $ \env st ->
-             let !(escs, st', ans) = unEscM m env st
-             in (escs, st', (escs `orElse` emptyEscapeAnalysis, ans))
+             let !(escs, cst, st', ans) = unEscM m env st
+             in (escs, cst, st', (escs `orElse` emptyEscapeAnalysis, ans))
 
 addChildKont :: EscapeAnalysis -> KontId -> KontId -> Disposition -> EscapeAnalysis
 addChildKont ea child parent disp
@@ -742,7 +826,7 @@ addChildKonts ea children parent disp
   = foldr (\child ea' -> addChildKont ea' child parent disp) ea children
 
 writeAnalysis :: EscapeAnalysis -> EscM ()
-writeAnalysis escs = EscM $ \_ st -> (Just escs, st, ())
+writeAnalysis escs = EscM $ \_ st -> (Just escs, mempty, st, ())
 
 inInnerContext :: Disposition -> EscM a -> EscM (KontId, a)
 inInnerContext disp m
@@ -756,10 +840,10 @@ inInnerContext disp m
     return (kid, a)
 
 getState :: EscM EscState
-getState = EscM $ \_env st -> (Nothing, st, st)
+getState = EscM $ \_env st -> (Nothing, mempty, st, st)
 
 putState :: EscState -> EscM ()
-putState st' = EscM $ \_env _st -> (Nothing, st', ())
+putState st' = EscM $ \_env _st -> (Nothing, mempty, st', ())
 
 mkFreshKontId :: EscM KontId
 mkFreshKontId
@@ -850,30 +934,43 @@ instance HasId MarkedVar where identifier = unmark
 
 -- | Decide whether a variable should be contified, returning the marked
 -- variable and a flag (True if contifying).
-markVar :: Id -> CallInfo -> KontId -> (MarkedVar, Bool)
+markVar :: Id -> CallInfo -> KontId -> (CfyStats, MarkedVar, Bool)
 markVar x ci tgtKontId
   = case mkArgDescs x (idType x) IntSet.empty ci of
-      Just descs -> (Marked x (MakeKont descs tgtKontId), True)
-      Nothing    -> (Marked x Keep,                       False)
+      (cst, Just descs) -> (cst, Marked x (MakeKont descs tgtKontId), True)
+      (cst, Nothing)    -> (cst, Marked x Keep,                       False)
 
 -- | Decide whether a group of mutually recursive variables should be contified,
 -- returning the marked variables and a continuation id. Either all of the
 -- variables will be contified and floated into the given continuation binder
 -- or none of them will.
-markRecVars :: [Id] -> [CallInfo] -> [TotalArity] -> KontId -> KontIdSet -> [MarkedVar]
+markRecVars :: [Id] -> [CallInfo] -> [TotalArity] -> KontId -> KontIdSet -> (CfyStats, [MarkedVar])
 markRecVars xs cis lamCounts tgtKontId insideScopes
   | tracing
   , pprTraceShort "markRecVars" (ppr xs $$ ppr cis $$ ppr lamCounts $$
                                  ppr tgtKontId $$ text (show insideScopes)) False = undefined
   | any_inexact
-  = cancel -- Can't contify recursive functions unless calls are exact
+  = (arityMismatch, cancel) -- Can't contify recursive functions unless calls are exact
   | otherwise
-  = case zipWithM (\x ci -> mkArgDescs x (idType x) insideScopes ci) xs cis of
-      Just descss -> [ Marked x (MakeKont descs tgtKontId) | x <- xs | descs <- descss ]
-      _           -> cancel
+  = case findCulprit csts_and_argDescss of
+      Nothing  -> (ZeroCfyStats, [ Marked x (MakeKont descs tgtKontId)
+                                 | x <- xs | (_, Just descs) <- csts_and_argDescss ])
+      Just cst -> (scaleCfyStats (length xs) cst, cancel)
   where
     any_inexact = or (zipWith (\ci n -> ci_arity ci /= n) cis lamCounts)
     cancel = [ Marked x Keep | x <- xs ]
+    
+    csts_and_argDescss
+      = zipWith (\x ci -> mkArgDescs x (idType x) insideScopes ci) xs cis
+    
+    findCulprit ((_, Just _) : pairs)
+      = findCulprit pairs
+    findCulprit ((cst, Nothing) : _)
+      = Just cst
+    findCulprit []
+      = Nothing
+    
+    arityMismatch = emptyCfyStats { cst_arityMismatch = length xs }
 
 -- | Return a constant value for each argument that needs one, given the type
 -- and total arity of a function to be contified and a call made to it. Any
@@ -897,12 +994,14 @@ markRecVars xs cis lamCounts tgtKontId insideScopes
 -- bound in an outer scope. This is fine, because the extra arguments cannot
 -- change the actual return type, so we don't need to fix (mask out) the extra
 -- arguments. TODO Be more sure about this.
-mkArgDescs :: Var -> Type -> KontIdSet -> CallInfo -> Maybe [ArgDesc]
+mkArgDescs :: Var -> Type -> KontIdSet -> CallInfo -> (CfyStats, Maybe [ArgDesc])
 mkArgDescs x _ _ _
-  | idHasRules x = Nothing -- unlikely but possible, and contification
-                           -- would likely get in the way of rule firings
+  | idHasRules x = ( emptyCfyStats { cst_dontCfyRules = 1 }
+                   , Nothing ) -- unlikely but possible, and contification
+                               -- would likely get in the way of rule firings
 mkArgDescs x ty ins (CI { ci_arity = arity, ci_args = call, ci_kontId = kid })
-  = go ty call
+  = case go ty call of Left cst    -> (cst, Nothing)
+                       Right descs -> (ZeroCfyStats, Just descs)
   where
     (_tyVars, retTy) = splitPiTyN ty arity
     freeInRetTy     = tyVarsOfType retTy
@@ -910,12 +1009,14 @@ mkArgDescs x ty ins (CI { ci_arity = arity, ci_args = call, ci_kontId = kid })
     go ty (Type tyArg : call)
       | tyVar `elemVarSet` freeInRetTy
       = if kid `IntSet.member` ins
-          then Nothing -- Note [Determining fixed type values]
+          then Left ( emptyCfyStats { cst_polyFail = 1 } ) -- Note [Determining fixed type values]
           else -- Start over with new return type
-               (FixedType tyArg :) <$> mkArgDescs x (substTyWith [tyVar] [tyArg] bodyTy) ins
-                                                    (CI { ci_arity  = length call
-                                                        , ci_args   = call
-                                                        , ci_kontId = kid })
+               case mkArgDescs x (substTyWith [tyVar] [tyArg] bodyTy) ins
+                                              (CI { ci_arity  = length call
+                                                  , ci_args   = call
+                                                  , ci_kontId = kid }) of
+                  (_, Just descs) -> Right (FixedType tyArg : descs)
+                  (cst, Nothing)  -> Left cst
       | otherwise
       = (TyArg tyVar :) <$> go bodyTy call
       where
@@ -930,7 +1031,7 @@ mkArgDescs x ty ins (CI { ci_arity = arity, ci_args = call, ci_kontId = kid })
         (argTy, retTy) = splitFunTy_maybe ty `orElse`
                            pprPanic "mkArgDescs" (ppr ty <+> ppr arg)
                            
-    go _ [] = Just []
+    go _ [] = Right []
 
 splitPiTyN :: Type -> TotalArity -> ([Maybe TyVar], Type)
 splitPiTyN ty n
@@ -961,11 +1062,13 @@ nkb = -1
 
 -- Escape analysis --
 
-escAnalProgram :: ContifySwitches -> SeqCoreProgram -> MarkedProgram
+escAnalProgram :: ContifySwitches -> SeqCoreProgram -> (CfyStats, MarkedProgram)
 escAnalProgram mode binds
-  | dumping   = pprTrace "escAnalProgram" (pprTopLevelAnnBinds ans) ans
-  | otherwise = ans
-  where ans = map (runEscM mode . escAnalTopLevelBind mode) binds
+  | dumping   = pprTrace "escAnalProgram" (pprTopLevelAnnBinds ans) (cst, ans)
+  | otherwise = (cst, ans)
+  where
+    (csts, ans) = unzip $ map (runEscM mode . escAnalTopLevelBind mode) binds
+    cst = mconcat csts
 
 escAnalTopLevelBind :: ContifySwitches -> SeqCoreBind -> EscM MarkedBind
 escAnalTopLevelBind mode bind
@@ -1005,8 +1108,8 @@ escAnalBind (NonRec (BindTerm bndr rhs)) escs_body
         escAnalId bndr >> escAnalRhsTerm rhs
       -- escAnalId looks at rules and unfoldings, which act as alternate RHSes
     let allowFloat = not (cs_gentle mode)
-        occs = checkEscaping escs_body bndr kontId allowFloat IntSet.empty
-        (marked, rhs_escapes)
+        (cst1, occs) = checkEscaping escs_body bndr kontId allowFloat IntSet.empty
+        (cst2, marked, rhs_escapes)
           | NonEsc ci region <- occs
           , region == Outside || okayToFloat bndr rhs' ci
           = let tgtKontId = case region of Outside     -> kontId
@@ -1015,11 +1118,13 @@ escAnalBind (NonRec (BindTerm bndr rhs)) escs_body
                                            _           -> pprPanic "escAnalBind" $
                                                             ppr bndr $$ ppr occs $$
                                                             ppr escs_body
-                (marked, contifying) = markVar bndr ci tgtKontId
-            in (marked, not contifying || ci_arity ci /= lamCount)
+                (cst, marked, contifying) = markVar bndr ci tgtKontId
+            in (cst, marked, not contifying || ci_arity ci /= lamCount)
               -- Note [Contifying inexactly-applied functions]
+          | NonEsc _ _ <- occs
+          = (emptyCfyStats { cst_scopeMismatch = 1 }, Marked bndr Keep, True)
           | otherwise
-          = (Marked bndr Keep, True)
+          = (ZeroCfyStats, Marked bndr Keep, True)
         escs_rhs' | rhs_escapes, cs_gentle (ee_mode env)
                   = markAllAsEscaping escs_rhs
                   | otherwise
@@ -1031,6 +1136,8 @@ escAnalBind (NonRec (BindTerm bndr rhs)) escs_body
         
         bind' = (nkb, AnnNonRec (nkb, AnnBindTerm marked rhs'))
     
+    writeStats cst1
+    writeStats cst2
     writeAnalysis escs_rhs''
     return $ (env_body, Just bind')
 
@@ -1059,18 +1166,24 @@ escAnalBind (Rec pairs@(BindTerm {} : _)) escs_body
              captureAnalysis $ escAnalId bndr >> escAnalRhsTerm term
     let escs = addChildKonts (mconcat escs_rhss <> escs_body) rhsKontIds kontId Child
         allowFloat = not (cs_gentle mode)
-        (pairs', contifying)
-          | Just (occs, floatToKontId) <- checkEscapingRec escs bndrs kontId allowFloat rhsKontIdSet
+        (cst1, mb_occs) = checkEscapingRec escs bndrs kontId allowFloat rhsKontIdSet
+        (cst2, pairs', contifying)
+          | Just (occs, floatToKontId) <- mb_occs
           , let tgtKontId = floatToKontId `orElse` kontId
           , let (bndrs_live, cis, rhss'_live, lamCounts_live)
                   = unzip4 [ (bndr, ci, rhs', lamCount)
                            | ((bndr, Just ci), rhs', lamCount) <-
                                zip3 occs rhss' lamCounts ]
-          , let bndrs_marked = markRecVars bndrs_live cis lamCounts_live tgtKontId rhsKontIdSet
+          , let (cst_bndrs, bndrs_marked) = markRecVars bndrs_live cis lamCounts_live tgtKontId rhsKontIdSet
           , isNothing floatToKontId || and (zipWith3 okayToFloat bndrs_live rhss'_live cis)
-          = ([ (nkb, AnnBindTerm bndr rhs') | bndr <- bndrs_marked | rhs' <- rhss'_live ], True)
+          = (cst_bndrs, [ (nkb, AnnBindTerm bndr rhs') | bndr <- bndrs_marked | rhs' <- rhss'_live ], True)
           | otherwise
-          = ([ (nkb, AnnBindTerm (Marked bndr Keep) rhs') | bndr <- bndrs | rhs' <- rhss' ], False)
+          = (cst_keep,  [ (nkb, AnnBindTerm (Marked bndr Keep) rhs') | bndr <- bndrs | rhs' <- rhss' ], False)
+          where
+            cst_keep | Just _ <- mb_occs = emptyCfyStats { cst_scopeMismatch = 1 }
+                         -- we just made the decision now
+                     | otherwise         = ZeroCfyStats
+                         -- decision was made earlier
         
         escs_rhss'
           | not contifying, cs_gentle mode = markAllAsEscaping (mconcat escs_rhss)
@@ -1079,7 +1192,9 @@ escAnalBind (Rec pairs@(BindTerm {} : _)) escs_body
         escs_rhss''  = addChildKonts escs_rhss' rhsKontIds kontId disp
           where disp | contifying = Merged
                      | otherwise  = Child
-        
+    
+    writeStats cst1
+    writeStats cst2
     writeAnalysis (escs_rhss'' `forgetVars` bndrs)
     
     let ans | null pairs' = 
@@ -1395,34 +1510,49 @@ kontCallConv env var = lookupVarEnv (ce_contifying env) var
 zapSubst :: CfyEnv -> CfyEnv
 zapSubst env = env { ce_subst = zapSubstEnv (ce_subst env) }
 
+-- Monad --
+
+type CfyM a = Writer CfyStats a
+
+runCfyM :: CfyM a -> (CfyStats, a)
+runCfyM m = (cst, a)
+  where (a, cst) = runWriter m
+
+cfyM :: (CfyStats, a) -> CfyM a
+cfyM (cst, a) = writer (a, cst)
+
+instance MonadCfyStats (Writer CfyStats) where
+  writeStats = tell
+
 -- Contification --
 
-cfyInTopLevelBinds :: ContifySwitches -> MarkedProgram -> SeqCoreProgram
-cfyInTopLevelBinds mode binds = map cfy binds
+cfyInTopLevelBinds :: ContifySwitches -> MarkedProgram -> (CfyStats, SeqCoreProgram)
+cfyInTopLevelBinds mode binds = runCfyM $ mapM cfy binds
   where
-    cfy (_, AnnNonRec pair) = NonRec (do_pair pair)
-    cfy (_, AnnRec pairs)   = Rec (map do_pair pairs)
+    cfy (_, AnnNonRec pair) = NonRec <$> do_pair pair
+    cfy (_, AnnRec pairs)   = Rec <$> mapM do_pair pairs
     
-    do_pair pair = cfyInRhs env (unmark (binderOfAnnPair pair)) pair
+    do_pair pair = cfyInRhs env TopLevel (unmark (binderOfAnnPair pair)) pair
     
     env = (initCfyEnv mode) { ce_subst = extendInScopeIds emptySubst bndrs }
       -- Start fresh for each top-level bind, since only locals can be contified
     bndrs = [ bndr | Marked bndr _ <- bindersOfAnnBinds binds ]
 
-cfyInBind :: CfyEnv -> MarkedBind -> (CfyEnv, Maybe SeqCoreBind)
+cfyInBind :: CfyEnv -> MarkedBind -> CfyM (CfyEnv, Maybe SeqCoreBind)
 cfyInBind env bind =
-  case bind of
+  cfyM $ case bind of
     (_, AnnNonRec pair) ->
       case mark of MakeKont _ tgtKontId | tgtKontId /= ce_kontId env
                                        -> ASSERT(not (cs_gentle (ce_mode env)))
-                                          (env_float tgtKontId, Nothing)
-                   _                   -> (env_no_float, Just bind')
+                                          (cst_float, (env_float tgtKontId, Nothing))
+                   _                   -> (cst,       (env_no_float, Just bind'))
         where
           x@(Marked _ mark) = binderOfAnnPair pair
           
-          (env', x') = cfyInBndr env x
-          pair'      = cfyInRhs env x' pair
-          bind'      = NonRec pair'
+          (env', x')   = cfyInBndr env x
+          (cst, pair') = runCfyM $ cfyInRhs env NotTopLevel x' pair
+          cst_float    = cst <> emptyCfyStats { cst_bindsFloated = 1 }
+          bind'        = NonRec pair'
           
           env_float tgtKontId
             = env' { ce_floats = addFloat (ce_floats env') tgtKontId bind' }
@@ -1431,32 +1561,45 @@ cfyInBind env bind =
     (_, AnnRec pairs) ->
       case mark of MakeKont _ tgtKontId  | tgtKontId /= ce_kontId env
                                         -> ASSERT(not (cs_gentle (ce_mode env)))
-                                           (env_float tgtKontId, Nothing)
-                   _                    -> (env_no_float, Just bind')
+                                           (cst_float, (env_float tgtKontId, Nothing))
+                   _                    -> (cst,       (env_no_float, Just bind'))
         where
           xs@(Marked _ mark : _) = ASSERT(not (null pairs))
                                    map binderOfAnnPair pairs
-          (env', xs') = cfyInRecBndrs env xs
-          pairs'      = zipWith (cfyInRhs env') xs' pairs
-          bind'       = Rec pairs'
+          (env', xs')   = cfyInRecBndrs env xs
+          (cst, pairs') = runCfyM $ zipWithM (cfyInRhs env' NotTopLevel) xs' pairs
+          cst_float     = cst <> emptyCfyStats { cst_bindsFloated = length pairs }
+          bind'         = Rec pairs'
           
           env_float tgtKontId
             = env' { ce_floats = addFloat (ce_floats env') tgtKontId bind' }
           env_no_float = env'
 
-cfyInRhs :: CfyEnv -> Id -> MarkedBindPair -> SeqCoreBindPair
-cfyInRhs env x' (_, AnnBindTerm (Marked _ Keep) term)
-  = BindTerm x' (cfyInTerm env term)
-cfyInRhs env j' (_, AnnBindTerm (Marked _ (MakeKont descs _)) term)
-  = BindJoin j' (Join xs body')
+cfyInRhs :: CfyEnv -> TopLevelFlag -> Id -> MarkedBindPair -> CfyM SeqCoreBindPair
+cfyInRhs env lvl x' (_, AnnBindTerm (Marked _ Keep) term)
+  = do
+    unless (isTopLevel lvl) $ writeStats (emptyCfyStats { cst_bindsTotal    = 1
+                                                        , cst_bindsNotCfied = 1 })
+    BindTerm x' <$> cfyInTerm env term
+cfyInRhs env lvl j' (_, AnnBindTerm (Marked _ (MakeKont descs _)) term)
+  = ASSERT(isNotTopLevel lvl)
+    do
+    writeStats cst
+    writeStats (emptyCfyStats { cst_bindsTotal = 1
+                              , cst_bindsCfied = 1 })
+    BindJoin j' . Join xs <$> (writeStats cst >> body')
   where
-    (env', xs, maybe_kontId, _, body) = etaExpandForJoinBody env descs term
+    (cst, (env', xs, maybe_kontId, _, body)) = runCfyM $ etaExpandForJoinBody env descs term
     flts  = case maybe_kontId of Just kontId -> floatsAt (ce_floats env') kontId
                                  Nothing     -> []
-    body' = addLets flts $ cfyInComm env' body
-cfyInRhs env j' (_, AnnBindJoin (Marked _ Keep) join)
-  = BindJoin j' (cfyInJoin env join)
-cfyInRhs _ _ (_, AnnBindJoin (Marked j (MakeKont _ _)) _)
+    body' = addLets flts <$> cfyInComm env' body
+cfyInRhs env lvl j' (_, AnnBindJoin (Marked _ Keep) join)
+  = ASSERT(isNotTopLevel lvl)
+    do
+    writeStats (emptyCfyStats { cst_bindsTotal = 1
+                              , cst_joinBinds  = 1 })
+    BindJoin j' <$> cfyInJoin env join
+cfyInRhs _ _ _ (_, AnnBindJoin (Marked j (MakeKont _ _)) _)
   = pprPanic "cfyInRhs" (text "Trying to contify a join point" $$ pprBndr LetBind j)
 
 cfyInBndr :: CfyEnv -> MarkedVar -> (CfyEnv, Var)
@@ -1525,12 +1668,12 @@ cfyInIdInfo env mark var
                                                    -- update with new IdInfo
     unf' = cfyInUnfolding env var mark unf
 
-cfyInTerm :: CfyEnv -> MarkedTerm -> SeqCoreTerm
-cfyInTerm _   (_, AnnLit lit)         = Lit lit
-cfyInTerm env (_, AnnType ty)         = Type (substTy (ce_subst env) ty)
-cfyInTerm env (_, AnnCoercion co)     = Coercion (substCo (ce_subst env) co)
+cfyInTerm :: CfyEnv -> MarkedTerm -> CfyM SeqCoreTerm
+cfyInTerm _   (_, AnnLit lit)         = return $ Lit lit
+cfyInTerm env (_, AnnType ty)         = return $ Type (substTy (ce_subst env) ty)
+cfyInTerm env (_, AnnCoercion co)     = return $ Coercion (substCo (ce_subst env) co)
 cfyInTerm env (_, AnnVar x)           = ASSERT2(isNothing (kontCallConv env x_new), ppr x_new)
-                                        Var x_new
+                                        return $ Var x_new
   where x_new = substIdOccAndRefine (ce_subst env) x
 cfyInTerm env (k, AnnCompute ty comm) | null flts
                                       , (_, AnnEval (_, AnnVar x) []
@@ -1538,63 +1681,64 @@ cfyInTerm env (k, AnnCompute ty comm) | null flts
                                       = cfyInTerm env' (nkb, AnnVar x)
                                           -- Eta-expanded by case analysis
                                       | otherwise
-                                      = Compute (substTy (ce_subst env) ty)
-                                                (addLets flts $ cfyInComm env' comm)
+                                      = Compute (substTy (ce_subst env) ty) . addLets flts
+                                                <$> cfyInComm env' comm
   where
     flts = floatsAt (ce_floats env) k 
     env' = env { ce_kontId = k }    
 cfyInTerm env (_, AnnLam (Marked x mark) body)
   = ASSERT2(isKeep mark, ppr x)
-    Lam x' body'
+    Lam x' <$> body'
   where
     (subst', x') = substBndr (ce_subst env) x
     -- Lambda variables can have unfoldings, but those unfoldings are only ever
     -- constructor applications to variables, so no need to worry about contifying
     body' = cfyInTerm (env { ce_subst = subst' }) body
 
-cfyInComm :: CfyEnv -> MarkedCommand -> SeqCoreCommand
+cfyInComm :: CfyEnv -> MarkedCommand -> CfyM SeqCoreCommand
 cfyInComm env (_, AnnLet bind comm)
-  = maybe id Let maybe_bind' comm'
-  where
-    (env', maybe_bind') = cfyInBind env bind
-    comm' = cfyInComm env' comm
+  = do
+    (env', maybe_bind') <- cfyInBind env bind
+    comm'               <- cfyInComm env' comm
+    return $ maybe id Let maybe_bind' comm'
+
 cfyInComm env (_, AnnJump args j)
-  = Jump (map (cfyInTerm env) args) (substIdOccAndRefine (ce_subst env) j)
+  = Jump <$> mapM (cfyInTerm env) args <*> pure (substIdOccAndRefine (ce_subst env) j)
 cfyInComm env (_, AnnEval (_, AnnVar x) frames end)
   | let j' = substIdOccAndRefine (ce_subst env) x
   , Just (ByJump descs) <- kontCallConv env j'
   = ASSERT2(all (isAppFrame . deAnnotateFrame) frames, ppr x $$ ppr (map deAnnotateFrame frames))
     ASSERT2(isReturn (deAnnotateEnd end), ppr (deAnnotateEnd end))
     let args  = removeFixedArgs [ arg | (_, AnnApp arg) <- frames ] descs
-        args' = map (cfyInTerm env) args
-    in Jump args' j'
+        args' = mapM (cfyInTerm env) args
+    in Jump <$> args' <*> pure j'
 cfyInComm env (_, AnnEval term frames end)
-  = Eval (cfyInTerm env term) (map (cfyInFrame env) frames) (cfyInEnd env end)
+  = Eval <$> cfyInTerm env term <*> mapM (cfyInFrame env) frames <*> cfyInEnd env end
 
-cfyInFrame :: CfyEnv -> MarkedFrame -> SeqCoreFrame
-cfyInFrame env (_, AnnApp arg) = App (cfyInTerm env arg)
-cfyInFrame env (_, AnnCast co) = Cast (substCo (ce_subst env) co)
-cfyInFrame env (_, AnnTick ti) = Tick (substTickish (ce_subst env) ti)
+cfyInFrame :: CfyEnv -> MarkedFrame -> CfyM SeqCoreFrame
+cfyInFrame env (_, AnnApp arg) = App <$> (cfyInTerm env arg)
+cfyInFrame env (_, AnnCast co) = return $ Cast (substCo (ce_subst env) co)
+cfyInFrame env (_, AnnTick ti) = return $ Tick (substTickish (ce_subst env) ti)
 
-cfyInEnd :: CfyEnv -> MarkedEnd -> SeqCoreEnd
-cfyInEnd _   (_, AnnReturn)                       = Return
+cfyInEnd :: CfyEnv -> MarkedEnd -> CfyM SeqCoreEnd
+cfyInEnd _   (_, AnnReturn)                       = return Return
 cfyInEnd env (_, AnnCase (Marked bndr mark) alts) = ASSERT2(isKeep mark, ppr bndr)
-                                                    Case bndr' alts'
+                                                    Case bndr' <$> alts'
   where
     (subst', bndr') = substBndr (ce_subst env) bndr
-    alts'           = map (cfyInAlt (env { ce_subst = subst' })) alts
+    alts'           = mapM (cfyInAlt (env { ce_subst = subst' })) alts
 
-cfyInAlt :: CfyEnv -> MarkedAlt -> SeqCoreAlt
+cfyInAlt :: CfyEnv -> MarkedAlt -> CfyM SeqCoreAlt
 cfyInAlt env (_, AnnAlt con mbndrs rhs) = ASSERT2(all isKeep marks, ppr mbndrs)
-                                          Alt con bndrs' rhs'
+                                          Alt con bndrs' <$> rhs'
   where
     (bndrs, marks)   = unzip [ (bndr, mark) | Marked bndr mark <- mbndrs ]
     (subst', bndrs') = substBndrs (ce_subst env) bndrs
     rhs'             = cfyInComm (env { ce_subst = subst' }) rhs
 
-cfyInJoin :: CfyEnv -> MarkedJoin -> SeqCoreJoin
+cfyInJoin :: CfyEnv -> MarkedJoin -> CfyM SeqCoreJoin
 cfyInJoin env (_, AnnJoin mbndrs body) = ASSERT2(all isKeep marks, ppr mbndrs)
-                                         Join bndrs' body'
+                                         Join bndrs' <$> body'
   where
     (bndrs, marks)   = unzip [ (bndr, mark) | Marked bndr mark <- mbndrs ]
     (subst', bndrs') = substBndrs (ce_subst env) bndrs
@@ -1612,9 +1756,9 @@ cfyInRule env rule@(Core.Rule { Core.ru_bndrs = bndrs, Core.ru_args = args, Core
         term = termFromCoreExprNoContify expr
         comm = case term of Compute _ body -> body
                             other          -> Eval other [] Return
-        comm_ann = runEscM (ce_mode env) $ escAnalComm comm
-        comm' = cfyInComm env' comm_ann
-        expr' = commandToCoreExpr (termType term) comm'
+        (_, comm_ann) = runEscM (ce_mode env) $ escAnalComm comm
+        (_, comm')    = runCfyM (cfyInComm env' comm_ann)
+        expr'         = commandToCoreExpr (termType term) comm'
 
 cfyInUnfolding :: CfyEnv -> Id -> KontOrFunc -> Unfolding -> Unfolding
 cfyInUnfolding env id mark unf
@@ -1624,17 +1768,19 @@ cfyInUnfolding env id mark unf
         | not (Core.isStableSource (Core.uf_src unf)) -> Core.NoUnfolding -- don't bother
         | otherwise -> mkCoreUnfolding src is_top tmpl' arity' guid'
             where
-              term = runEscM (ce_mode env) $ escAnalTerm (termFromCoreExpr tmpl)
+              (_, term) = runEscM (ce_mode env) $ escAnalTerm (termFromCoreExprNoContify tmpl)
               
               (tmpl', arity', guid')
                 = case mark of
                     Keep
                       | isJoinId id ->
-                          (joinToCoreExpr (termType (deAnnotateTerm bodyTerm)) (cfyInJoin env join), arity, guid)
+                          (joinToCoreExpr (termType (deAnnotateTerm bodyTerm)) join', arity, guid)
                       | otherwise ->
-                          (termToCoreExpr (cfyInTerm env term), arity, guid)
+                          (termToCoreExpr term', arity, guid)
                       where
+                        (_, term') = runCfyM $ cfyInTerm env term
                         join = (nkb, AnnJoin bndrs body)
+                        (_, join') = runCfyM $ cfyInJoin env join
                         -- It's possible there are too many binders (greater than the
                         -- arity of the join point, which is determined by the
                         -- callers), so in general we must put some back.
@@ -1648,8 +1794,8 @@ cfyInUnfolding env id mark unf
                       -> (joinToCoreExpr ty join, arity', guid')
                       where
                         join = Join bndrs body'
-                        (env', bndrs, _, ty, body) = etaExpandForJoinBody env descs term
-                        body' = cfyInComm env' body
+                        (_, (env', bndrs, _, ty, body)) = runCfyM $ etaExpandForJoinBody env descs term
+                        (_, body') = runCfyM $ cfyInComm env' body
                         arity' = count isValArgDesc descs `min` 1
                         guid' = fixGuid descs guid
       Core.DFunUnfolding { Core.df_bndrs = bndrs, Core.df_con = con, Core.df_args = args } ->
@@ -1659,7 +1805,7 @@ cfyInUnfolding env id mark unf
         where
           (subst', bndrs') = substBndrs (ce_subst env) bndrs
           env' = env { ce_subst = subst' }
-          args' = map (onCoreExpr (cfyInTerm env' . runEscM (ce_mode env) . escAnalTerm)) args
+          args' = map (onCoreExpr (snd . runCfyM . cfyInTerm env' . snd . runEscM (ce_mode env) . escAnalTerm)) args
       _ -> unf
   where
     fixGuid descs guid@(Core.UnfIfGoodArgs { Core.ug_args = args })
@@ -1693,9 +1839,9 @@ cfyInUnfolding env id mark unf
 
 
 etaExpandForJoinBody :: CfyEnv -> [ArgDesc] -> MarkedTerm
-                     -> (CfyEnv, [Var], Maybe KontId, Type, MarkedCommand)
+                     -> CfyM (CfyEnv, [Var], Maybe KontId, Type, MarkedCommand)
 etaExpandForJoinBody env descs term
-  = (env_final, bndrs_final, swallowedKontId, ty, etaBody)
+  = cfyM (cst, (env_final, bndrs_final, swallowedKontId, ty, etaBody))
   where
     -- Calculate outer binders (existing ones from expr, minus fixed args)
     (bndrs, body) = collectNBinders (length descs) term
@@ -1726,6 +1872,13 @@ etaExpandForJoinBody env descs term
     ty = foldl (\ty frTy -> substTy subst_final (frameType ty frTy))
                (substTy subst_final . termType . deAnnotateTerm $ body)
                (map deAnnotateFrame etaFrames)
+    
+    cst = emptyCfyStats { cst_etaExpanded = if null extraArgs then 0 else 1 
+                        , cst_splitLams   = case body of (_, AnnLam {}) -> 1; _ -> 0
+                        , cst_typeFixed   = if any is_fixed_type descs then 1 else 0 }
+      where
+        is_fixed_type (FixedType _) = True
+        is_fixed_type _             = False
     
     -- Process a binder, possibly dropping it, and return a new subst
     doBndr :: Subst -> (Var, ArgDesc) -> (Subst, Maybe Var)
@@ -1777,6 +1930,42 @@ etaExpandForJoinBody env descs term
 ----------------
 -- Miscellany --
 ----------------
+
+instance Outputable CfyStats where
+  ppr ZeroCfyStats = ppr emptyCfyStats
+  ppr (CfyStats { cst_bindsTotal    = tot,    cst_joinBinds     = js
+                , cst_bindsCfied    = cfied,  cst_bindsNotCfied = not_cfied
+                , cst_bindsFloated  = fltd
+                , cst_splitLams     = split,  cst_etaExpanded   = etad
+                , cst_typeFixed     = fixed,  cst_polyFail      = poly_fails
+                , cst_dontCfyRules  = rules
+                , cst_scopeMismatch = sc_mis, cst_arityMismatch = ar_mis })
+    = vcat [ text "    Local Binds:" <+> int tot
+           , text "--------------------"
+           , text "  Already Joins:" <+> with_pct js tot
+           , text "  Not Contified:" <+> with_pct not_cfied tot
+           , text "      Contified:" <+> with_pct cfied tot
+           , blankLine
+           , text "      Contified:" <+> int cfied
+           , text "--------------------"
+           , text "     Floated In:" <+> with_pct fltd cfied
+           , text "     Lost Arity:" <+> with_pct split cfied
+           , text "   Eta-Expanded:" <+> with_pct etad cfied
+           , text "  Monomorphosed:" <+> with_pct fixed cfied
+           , blankLine
+           , text "  Not Contified:" <+> int not_cfied
+           , text "--------------------"
+           , text "    Wrong Scope:" <+> with_pct sc_mis not_cfied
+           , text "    Wrong Arity:" <+> with_pct ar_mis not_cfied
+           , text "     Can't Mono:" <+> with_pct poly_fails not_cfied
+           , text "      Has Rules:" <+> with_pct rules not_cfied
+           ]
+    where
+      with_pct 0 0 = int 0
+      with_pct num den = ppr num <+> parens (pct num den)
+      pct num den = text (showFFloat (Just 2)
+                           (fromIntegral num * (100.0 :: Float) / fromIntegral den)
+                           "%")
 
 instance Outputable EscapeAnalysis where
   ppr (EA { ea_calls = calls, ea_allVars = allVars, ea_kstates = kstates })

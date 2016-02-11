@@ -283,7 +283,7 @@ runSeqCorePasses :: SeqFlags -> [SeqCoreToDo] -- Invariant: not SeqCoreDoCore
 runSeqCorePasses sflags todos guts
   = do
     dflags <- getDynFlags
-    let binds = fromCoreModule (mg_binds guts)
+    binds <- fromCoreModuleM sflags (mg_binds guts)
     liftIO $
       Err.dumpIfSet dflags (dumping dflags) "Translated Sequent Core" $
         pprTopLevelBinds binds
@@ -298,7 +298,7 @@ runSeqCorePasses sflags todos guts
         liftIO $ showPass dflags pass
         (guts', binds') <- case pass of
           SeqCoreDoSimplify iters mode  -> runSimplifier iters mode guts binds
-          SeqCoreDoContify cs           -> bindsOnly $ return $ runContify cs binds
+          SeqCoreDoContify cs           -> bindsOnly $ runContify sflags cs binds
           SeqCoreDoFloatOutwards fs     -> bindsOnly $ runFloatOut fs sflags binds
           SeqCoreDoSpecConstr           -> bindsOnly $ runSpecConstr binds
           SeqCoreDoPasses inner         -> doPasses (guts, binds) inner

@@ -10,19 +10,21 @@
 
 module Language.SequentCore.Translate (
   -- $txn
-  fromCoreModule, termFromCoreExpr,
+  fromCoreModule, fromCoreModuleM, termFromCoreExpr,
   fromCoreModuleNoContify, termFromCoreExprNoContify,
   bindsToCore,
   commandToCoreExpr, termToCoreExpr, joinToCoreExpr, joinToCoreExpr', joinIdToCore,
   CoreContext, kontToCoreExpr,
-  onCoreExpr, onSequentCoreTerm
+  onCoreExpr, onCoreExprM, onSequentCoreTerm, onSequentCoreTermM
 ) where
 
+import Language.SequentCore.Driver.Flags
 import {-# SOURCE #-} Language.SequentCore.Contify
 import Language.SequentCore.Syntax
 import Language.SequentCore.WiredIn
 
 import BasicTypes ( RecFlag(..), isNonRec )
+import CoreMonad
 import qualified CoreSyn as Core
 import qualified CoreUtils as Core
 import Id
@@ -50,7 +52,12 @@ import Util       ( lengthExceeds )
 
 -- | Translates a list of Core bindings into Sequent Core.
 fromCoreModule :: [Core.CoreBind] -> [SeqCoreBind]
-fromCoreModule = runContifyGently . fromCoreTopLevelBinds
+fromCoreModule = contifyGentlyInProgram . fromCoreTopLevelBinds
+
+-- | Translates a list of Core bindings into Sequent Core, with the given flags
+-- in effect.
+fromCoreModuleM :: SeqFlags -> [Core.CoreBind] -> CoreM [SeqCoreBind]
+fromCoreModuleM sflags = runContifyGently sflags . fromCoreTopLevelBinds
 
 -- | Translates a list of Core bindings into Sequent Core, skipping the
 -- contification pass (see "Language.SequentCore.Contify"). 
@@ -276,6 +283,17 @@ altToCore retTy (Alt ac bs c) = (ac, bs, commandToCoreExpr retTy c)
 onCoreExpr :: (SeqCoreTerm -> SeqCoreTerm) -> (Core.CoreExpr -> Core.CoreExpr)
 onCoreExpr f = termToCoreExpr . f . termFromCoreExpr
 
+-- | Take a monadic operation on Sequent Core terms and perform it on Core
+-- expressions
+onCoreExprM :: Functor m
+            => (SeqCoreTerm -> m SeqCoreTerm) -> (Core.CoreExpr -> m Core.CoreExpr)
+onCoreExprM f e = termToCoreExpr `fmap` f (termFromCoreExpr e)
+
 -- | Take an operation on Core expressions and perform it on Sequent Core terms
 onSequentCoreTerm :: (Core.CoreExpr -> Core.CoreExpr) -> (SeqCoreTerm -> SeqCoreTerm)
 onSequentCoreTerm f = termFromCoreExpr . f . termToCoreExpr
+
+-- | Take a monadic operation on Core expressions and perform it on Sequent Core terms
+onSequentCoreTermM :: Functor m
+                   => (Core.CoreExpr -> m Core.CoreExpr) -> (SeqCoreTerm -> m SeqCoreTerm)
+onSequentCoreTermM f t = termFromCoreExpr `fmap` f (termToCoreExpr t)

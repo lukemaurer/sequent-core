@@ -8,9 +8,10 @@
 -- GHC Core.
 
 module Language.SequentCore.Plugin (
-  sequentPass
+  sequentPass, sequentPassWithFlags
 ) where
 
+import Language.SequentCore.Driver.Flags
 import Language.SequentCore.Syntax
 import Language.SequentCore.Translate
 
@@ -31,3 +32,14 @@ sequentPass :: ([SeqCoreBind] -> CoreM [SeqCoreBind])
             -> (ModGuts -> CoreM ModGuts)
 sequentPass process =
   bindsOnlyPass (fmap bindsToCore . process . fromCoreModule . deShadowBinds)
+
+-- | Similar to 'sequentPass', but takes a 'SeqFlags' for use by the
+-- translation.
+sequentPassWithFlags :: SeqFlags
+                     -> ([SeqCoreBind] -> CoreM [SeqCoreBind])
+                     -> (ModGuts -> CoreM ModGuts)
+sequentPassWithFlags sflags process =
+  bindsOnlyPass $ \binds -> do
+    term  <- fromCoreModuleM sflags (deShadowBinds binds)
+    term' <- process term
+    return $ bindsToCore term'
