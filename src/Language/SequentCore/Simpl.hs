@@ -1391,7 +1391,7 @@ simplJump env dsc csc args j
         -> do
            let -- Pretend to callSiteInline that we're just applying a bunch of
                -- arguments to a function
-               rhs'_maybe = callSiteInlineJoin env j' (activeUnfolding env j') [] end
+               rhs'_maybe = callSiteInlineJoin env j' (activeUnfolding env j') frames end
           
            case rhs'_maybe of
              Nothing
