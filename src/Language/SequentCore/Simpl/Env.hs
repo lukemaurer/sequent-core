@@ -1697,9 +1697,14 @@ instance Outputable MetaKont where
     = hang (text "Strict argument to:") 2 $ pprDeeper $
         ppr ai $$ pprMultiScopedKont fs end
   ppr (StrictLet { mk_binder  = bndr
+                 , mk_scope   = (_, csc)
                  , mk_command = command })
-    = text "Strict let binding of:" <+> pprBndr LambdaBind bndr $$
-      hang (text "In command:") 2 (pprDeeper $ ppr command)
+    = vcat [ text "Strict let binding of:" <+> pprBndr LambdaBind bndr
+           , hang (text "In command:") 2 (pprDeeper $ ppr command)
+           , ppUnless (isStopMetaKont mk) $
+             hang (text "With continuation:") 2 (pprDeeper $ ppr mk) ]
+    where
+      mk = retKont csc
   ppr (StrictLamBind { mk_binder   = bndr
                      , mk_term     = term
                      , mk_frames   = fs

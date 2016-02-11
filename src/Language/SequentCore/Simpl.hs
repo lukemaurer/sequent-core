@@ -1992,6 +1992,7 @@ mkDupableKont env dsc csc ty kont
                                  , mk_end = Simplified OkToDup (retType csc, mk') joinKont })
            
     when tracing $ liftCoreM $ putMsg $ hang (text "mkDupableKont DONE") 4 $
+      ppr kont $$ darrow $$
       ppr ans $$ vcat (map ppr (getFloatBinds flts))
     return (flts, ans)
   where
