@@ -629,8 +629,9 @@ completeBind env dsc csc x pair level
   = do
     (newArity, pair') <- tryEtaExpandRhs env pair
     let oldDef = findRealDef env x
+        occInfo = idOccInfo x -- use occ info of *old* binder (new one is zapped)
     newDef <- simplDef env dsc csc level x pair' oldDef
-    postInline <- postInlineUnconditionally env pair' level newDef
+    postInline <- postInlineUnconditionally env pair' occInfo level newDef
     if postInline
       then do
         tick (PostInlineUnconditionally x)
@@ -1692,9 +1693,10 @@ preInlineUnconditionally env_x _dsc_rhs pair level
                         _       -> True
 
 -- Based on postInlineUnconditionally in SimplUtils; see comments there
-postInlineUnconditionally :: SimplEnv -> OutBindPair -> TopLevelFlag -> Definition
+postInlineUnconditionally :: SimplEnv -> OutBindPair -> OccInfo -> TopLevelFlag
+                          -> Definition
                           -> SimplM Bool
-postInlineUnconditionally env pair level def
+postInlineUnconditionally env pair occ_info level def
   = do
     ans <- go (getMode env) <$> getDynFlags
     when tracing $ liftCoreM $ putMsg $ text "postInline" <+> ppr (binderOfPair pair) <> colon <+> text (show ans)
@@ -1718,7 +1720,6 @@ postInlineUnconditionally env pair level def
 
       where
         x = binderOfPair pair
-        occ_info = idOccInfo x
         active = isActive (sm_phase mode) (idInlineActivation x)
         trivial = case pair of
           BindTerm _ term -> isTrivialTerm term
