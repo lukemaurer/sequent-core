@@ -2140,13 +2140,28 @@ mkDupableAlt env caseBndr alt@(Alt altCon bndrs rhs)
     if commandIsDupable dflags rhs
       then return (emptyFloats, alt)
       else do
-        -- TODO Update definition of case binder! Importantly, we should update
-        -- the unfolding attached to the lambda-bound version of the case binder
-        -- because, unlike most unfoldings, that one cannot be recreated from
-        -- context.
+        let scrut_ty = idType caseBndr
         
-        let used_bndrs | isDeadBinder caseBndr = filter abstract_over bndrs
-                       | otherwise = bndrs ++ [caseBndr]
+            case_bndr_w_unf
+              = case altCon of
+                    DEFAULT    -> caseBndr
+                    DataAlt dc -> snd (setDef env caseBndr unf)
+                        where
+                               -- See Note [Case binders and join points]
+                           unf = mkInlineTermDef Nothing rhs
+                           rhs = mkAppTerm (Var (dataConWorkId dc)) $
+                                   (map Type (tyConAppArgs scrut_ty) ++
+                                    map mkVarArg bndrs)
+
+                    LitAlt {} -> warnPprTrace True __FILE__ __LINE__ (
+                                   ptext (sLit "mkDupableAlt")
+                                              <+> ppr caseBndr <+> ppr altCon ) $
+                                 caseBndr
+                         -- The case binder is alive but trivial, so why has
+                         -- it not been substituted away?
+        
+        let used_bndrs | isDeadBinder case_bndr_w_unf = filter abstract_over bndrs
+                       | otherwise = bndrs ++ [case_bndr_w_unf]
                   
             abstract_over bndr
                 | isTyVar bndr = True -- Abstract over all type variables just in case

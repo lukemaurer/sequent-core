@@ -37,7 +37,7 @@ module Language.SequentCore.Simpl.Env (
   IdDefEnv, Definition(..), UnfoldingGuidance(..),
   mkBoundToTerm, mkBoundToTermWithGuidance, termInlineBoringOk, mkTermDef,
   mkBoundToJoin, mkBoundToJoinWithGuidance, joinInlineBoringOk, mkJoinDef,
-  mkBoundToDFun,
+  mkBoundToDFun, mkInlineTermDef,
   findDef, findRealDef, setDef, activeUnfolding,
   defIsCheap, defIsConLike, defIsEvald, defIsSmallEnoughToInline, defIsStable,
   
@@ -88,7 +88,7 @@ import qualified CoreSubst
 import CoreSyn    ( Tickish(Breakpoint)
                   , UnfoldingGuidance(..), UnfoldingSource(..)
                   , hasSomeUnfolding, isCompulsoryUnfolding, isStableSource, mkOtherCon
-                  , tickishIsCode )
+                  , needSaturated, tickishIsCode, unSaturatedOk )
 import qualified CoreSyn as Core
 import CoreUnfold ( CallCtxt(..), mkCoreUnfolding, mkDFunUnfolding )
 import DataCon
@@ -463,6 +463,20 @@ mkTermDef env level term
 mkJoinDef :: SimplEnv -> OutJoin -> Definition
 mkJoinDef env join
   = mkBoundToJoin (dynFlags env) join InlineRhs
+
+mkInlineTermDef :: Maybe Arity -> OutTerm -> Definition
+mkInlineTermDef mb_arity term 
+  = mkBoundToTermWithGuidance term' InlineStable
+      TopLevel 	 -- Note [Top-level flag on inline rules] in CoreUnfold
+      arity 
+		  (UnfWhen unsat_ok boring_ok)
+  where
+    term' = occurAnalyseTerm term -- TODO implement simple optimizer
+    (unsat_ok, arity) = case mb_arity of
+                          Nothing -> (unSaturatedOk, manifestArity term')
+                          Just ar -> (needSaturated, ar)
+              
+    boring_ok = termInlineBoringOk term'
 
 mkBoundToTerm :: DynFlags -> OutTerm -> UnfoldingSource -> TopLevelFlag
               -> Bool -> Definition
