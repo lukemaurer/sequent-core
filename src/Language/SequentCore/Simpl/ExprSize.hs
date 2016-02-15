@@ -1,33 +1,42 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, CPP #-}
 
 module Language.SequentCore.Simpl.ExprSize (
-  ExprSize(..), termSize, kontSize, joinSize, commandSize
+  ExprSize(..), termSize, joinSize, commandSize
 ) where
 
 import Language.SequentCore.Syntax
+import Language.SequentCore.Translate
 
 import Bag
+import qualified CoreSyn as Core
+import qualified CoreUnfold as Core
 import DataCon
 import DynFlags
+import ForeignCall ( isSafeForeignCall )
 import Id
 import IdInfo
 import Literal
+import MkId      ( voidArgId, voidPrimId )
 import Outputable
 import PrelNames ( buildIdKey, augmentIdKey )
 import PrimOp
 import Type
 import TysPrim   ( realWorldStatePrimTy )
 import Unique
-import Util      ( count )
+import Util
 
 import qualified Data.ByteString as BS
+
+#define ASSERT(e)      if debugIsOn && not (e) then (assertPanic __FILE__ __LINE__) else
+#define ASSERT2(e,msg) if debugIsOn && not (e) then (assertPprPanic __FILE__ __LINE__ (msg)) else
+#define WARN( e, msg ) (warnPprTrace (e) __FILE__ __LINE__ (msg)) $
 
 -- Size of an expression, with argument and result discounts
 data ExprSize
   = ExprSize { esBase :: !Int
              , esArgDiscs :: ![Int]
              , esResultDisc :: !Int
-             }
+             } deriving (Eq)
 
 -- Size of an expression as represented internally during computation
 data BodySize
@@ -77,40 +86,41 @@ mkBodySize cap b as r
   | otherwise   = BodySize { bsBase = b, bsArgDiscs = as, bsResultDisc = r }
 
 termSize    :: DynFlags -> Int -> SeqCoreTerm    -> Maybe ExprSize
-kontSize    :: DynFlags -> Int -> SeqCoreKont    -> Maybe ExprSize
 joinSize    :: DynFlags -> Int -> SeqCoreJoin    -> Maybe ExprSize
 commandSize :: DynFlags -> Int -> SeqCoreCommand -> Maybe ExprSize
 
 termSize dflags cap term@(Lam {})
   = let (xs, body) = collectBinders term
         valBinders = filter isId xs
-        (sizeT, _, _) = sizeFuncs dflags cap valBinders
-    in body2ExprSize valBinders $ sizeT body
+        (sizeT, _) = sizeFuncs dflags cap valBinders
+        ans = body2ExprSize valBinders $ sizeT body
+    in WARN(coreDisagrees dflags term ans,
+       let { Just expected = coreSize dflags term
+           ; Just actual   = ans
+           ; expr = termToCoreExpr term }
+       in text "Core:" <+> ppr expected $$ ppr expr $$
+          text " Seq:" <+> ppr actual   $$ ppr term)
+     ans
 termSize dflags cap term
   = body2ExprSize [] $ sizeT term
   where
-    (sizeT, _, _) = sizeFuncs dflags cap []
+    (sizeT, _) = sizeFuncs dflags cap []
 
 commandSize dflags cap comm
   = body2ExprSize [] $ sizeC comm
   where
-    (_, _, sizeC) = sizeFuncs dflags cap []
-
-kontSize dflags cap kont = body2ExprSize [] $ sizeK kont
-  where
-    (_, sizeK, _) = sizeFuncs dflags cap []
+    (_, sizeC) = sizeFuncs dflags cap []
 
 joinSize dflags cap (Join xs comm)
   = body2ExprSize valBinders $ sizeC comm
   where
-    (_, _, sizeC) = sizeFuncs dflags cap valBinders
+    (_, sizeC) = sizeFuncs dflags cap valBinders
     valBinders = filter isId xs
 
 sizeFuncs :: DynFlags -> Int -> [Id] -> (SeqCoreTerm -> BodySize,
-                                         SeqCoreKont -> BodySize,
                                          SeqCoreCommand -> BodySize)
 sizeFuncs dflags !cap topArgs
-  = (sizeT, sizeK, sizeC)
+  = (sizeT, sizeC)
   where
     sizeT (Type _)       = sizeZero
     sizeT (Coercion _)   = sizeZero
@@ -118,14 +128,21 @@ sizeFuncs dflags !cap topArgs
     sizeT (Compute _ comm) = sizeC comm
     sizeT (Lit lit)      = sizeN (litSize lit)
     sizeT (Lam x body)   = sizeT body `addLamBndrSize` x
-    
-    sizeK (fs, end)      = foldr addSizeNSD (sizeEnd end) (map sizeFrame fs)
 
     sizeC (Let b c)      = addSizeNSD (sizeBind b) (sizeC c)
-    sizeC (Eval v fs e)  = sizeCut v fs e
+    sizeC (Eval (Compute _ (Eval v fs Return)) fs' e)
+                         = sizeC (Eval v (fs ++ fs') e)
+    sizeC (Eval v fs e)  = sizeCut v fs e `addSizeN` inlineScrutDiscount v fs e
     sizeC (Jump args j)  = sizeJump args j
     
-    sizeFrame (App arg)     = sizeArg arg
+    -- Note that addSizeOfKont (and hence this function) is only called on extra
+    -- frames after a function application, so what we're looking at in
+    -- CoreUnfold terms is
+    --   size_up_app (App (App (... (App other argn) ...) arg2) arg1),
+    -- where other is neither an App nor a Var. The use of 1 in that function
+    -- rather than 10 is likely a bug, but we reproduce it here anyway.
+    sizeFrame (App arg)     | not (isTyCoArg arg || isRealWorldTerm arg)
+                            = sizeArg arg `addSizeN` 1
     sizeFrame _             = sizeZero
     
     sizeEnd Return          = sizeZero
@@ -134,12 +151,10 @@ sizeFuncs dflags !cap topArgs
     sizeCut :: SeqCoreTerm -> [SeqCoreFrame] -> SeqCoreEnd -> BodySize
     -- Compare this clause to size_up_app in CoreUnfold; already having the
     -- function and arguments at hand avoids some acrobatics
-    sizeCut (Var f) frames@(App {} : _) end
+    sizeCut fun frames@(App {} : _) end
       = let (args, fs')   = collectArgs frames
-            realArgs      = filter (not . isTyCoArg) args
-            voids         = count isRealWorldTerm realArgs
-        in sizeArgs realArgs `addSizeNSD` sizeCall f realArgs voids
-                             `addSizeOfKont` (fs', end)
+        in sizeApp fun args `addSizeOfKont` (fs', end)
+    
     sizeCut (Var x) [] (Case _b alts)
       | x `elem` topArgs
       = combineSizes total max
@@ -165,6 +180,20 @@ sizeFuncs dflags !cap topArgs
     sizeArgs :: [SeqCoreTerm] -> BodySize
     sizeArgs args = foldr (addSizeNSD . sizeArg) sizeZero args
 
+    sizeApp :: SeqCoreTerm -> [SeqCoreArg] -> BodySize
+    sizeApp fun args
+      = sizeArgs realArgs `addSizeNSD` callSize
+      where
+        realArgs = filter (not . isTyCoArg) args
+        voids    = count isRealWorldTerm realArgs
+        callSize | Var f <- fun = sizeCall f realArgs voids
+                 | otherwise    = sizeT fun `addSizeN` (length realArgs - voids)
+                                    -- Bug compatibility with CoreUnfold:
+                                    -- should be multiplying by 10 and
+                                    -- eliminating the result discount. Probably
+                                    -- doesn't matter because the simplifier
+                                    -- eliminates these cases.
+
     -- Lifted from CoreUnfold
     sizeCall :: Id -> [SeqCoreTerm] -> Int -> BodySize
     sizeCall fun valArgs voids
@@ -180,6 +209,29 @@ sizeFuncs dflags !cap topArgs
 
     sizeAlts :: [SeqCoreAlt] -> BodySize
     sizeAlts alts = foldr (addAltSize . sizeAlt) sizeZero alts
+    
+    -- Replicating (awkwardly) the logic in the (Case e _ _ alts) clause of
+    -- size_up in CoreUnfold. Note that that clause won't be matched if v `elem`
+    -- top_args (because the previous one will).
+    inlineScrutDiscount :: SeqCoreTerm -> [SeqCoreFrame] -> SeqCoreEnd -> Int
+    inlineScrutDiscount (Var v) fs (Case _ alts)
+      | v `notElem` topArgs, is_inline_scrut v, all is_app fs
+      , not (lengthExceeds alts 1)
+      = -10
+      where
+        is_inline_scrut v
+          | isUnLiftedType (idType v)
+          = True
+          | otherwise
+          = case idDetails v of 
+              FCallId fc  -> not (isSafeForeignCall fc)
+              PrimOpId op -> not (primOpOutOfLine op)
+              _other      -> False
+        
+        is_app (App {}) = True
+        is_app _        = False
+    inlineScrutDiscount _ _ _
+      = 0
 
     -- We give a join point the same size as the corresponding
     -- lambda-abstraction. Conceivably, we could give join points credit for not
@@ -192,20 +244,26 @@ sizeFuncs dflags !cap topArgs
           -- An unlifted type has no heap allocation
           | isUnLiftedType (idType x) =  0
           | otherwise                 = 10
-    sizeBind (NonRec (BindJoin _p (Join xs comm)))
-      = foldl addLamBndrSize (sizeC comm) xs
+    sizeBind (NonRec (BindJoin _p join))
+      = sizeJoin join `addSizeN` 10
 
     sizeBind (Rec pairs)
-      = foldr (addSizeNSD . pairSize) (sizeN allocSize) pairs
+      = foldr (addSizeNSD . sizeBindPair) (sizeN allocSize) pairs
       where
         allocSize                     = 10 * length pairs
-        pairSize (BindTerm _x rhs)    = sizeT rhs
-        pairSize (BindJoin _p (Join xs comm))
-                                      = foldl addLamBndrSize (sizeC comm) xs
+
+    sizeBindPair :: SeqCoreBindPair -> BodySize
+    sizeBindPair (BindTerm _x rhs)  = sizeT rhs
+    sizeBindPair (BindJoin _j join) = sizeJoin join
+
+    sizeJoin :: SeqCoreJoin -> BodySize
+    sizeJoin (Join xs comm) = foldl addLamBndrSize (sizeC comm) $
+                                if null xs then [voidArgId] else xs
 
     sizeJump :: [SeqCoreArg] -> JoinId -> BodySize
     sizeJump args j
-      = let realArgs      = filter (not . isTyCoArg) args
+      = let realArgs      | null args = [Var voidPrimId]
+                          | otherwise = filter (not . isTyCoArg) args
             voids         = count isRealWorldTerm realArgs
         in sizeArgs realArgs `addSizeNSD` sizeCall j realArgs voids
     
@@ -233,22 +291,18 @@ sizeFuncs dflags !cap topArgs
     addSizeNSD (BodySize b1 as1 _) (BodySize b2 as2 r2)
       = mkBodySize cap (b1 + b2) (as1 `unionBags` as2) r2
 
-    -- If a continuation passes the value through unchanged, then it should not
-    -- count against the result discount (and has size zero anyway).
+    -- Faithfully reproduce CoreUnfold's buggy behavior by not cancelling a
+    -- nontrivial function expression's result discount when it's applied to
+    -- arguments. Note that this is unlikely to be a big deal in practice
+    -- because the simplifier flattens applications anyway.
     addSizeOfKont :: BodySize -> SeqCoreKont -> BodySize
-    addSizeOfKont size1 kont
-      | isPassThroughKont kont = size1
-      | otherwise              = size1 `addSizeNSD` sizeK kont
-
-    isPassThroughKont :: Kont b -> Bool
-    isPassThroughKont (_,  Case {})  = False
-    isPassThroughKont (fs, Return)   = all passThrough fs
+    addSizeOfKont size (frames, end)
+      = foldr (addSizeNSD . sizeFrame) baseSize frames
       where
-        passThrough f = case f of
-                          Tick _  -> True
-                          Cast _  -> True
-                          App arg -> isTyCoArg arg
-
+        baseSize = case end of Return  -> size
+                               Case {} -> size `addSizeNSD` sizeEnd end
+                                            -- Case determines result discount
+    
     infixl 6 `addSizeN`, `addSizeNSD`, `addSizeOfKont`
 
 -- Lifted from CoreUnfold
@@ -357,3 +411,25 @@ isRealWorldTerm :: Term b -> Bool
 isRealWorldTerm (Var id) = isRealWorldId id
 isRealWorldTerm _        = False
 
+-----------------
+-- Diagnostics --
+-----------------
+
+coreDisagrees :: DynFlags -> SeqCoreTerm -> Maybe ExprSize -> Bool
+coreDisagrees _ _ Nothing = False
+coreDisagrees dflags term (Just size)
+  = case coreSize dflags term of
+      Just size' -> size /= size'
+      Nothing    -> False
+
+coreSize :: DynFlags -> SeqCoreTerm -> Maybe ExprSize
+coreSize dflags term
+  = case Core.mkSimpleUnfolding dflags (termToCoreExpr term) of
+      Core.CoreUnfolding {
+        Core.uf_guidance = Core.UnfIfGoodArgs {
+          Core.ug_args = args,
+          Core.ug_size = size,
+          Core.ug_res  = res
+        }
+      } -> Just (ExprSize { esBase = size, esArgDiscs = args, esResultDisc = res })
+      _ -> Nothing
