@@ -272,9 +272,11 @@ simplLazyOrJoinBind env dsc csc new_bndr dsc_rhs csc_rhs pair level recFlag
         (flts, env', dsc') <- simplLazyBind env dsc new_bndr dsc_rhs
                                             old_bndr term level recFlag
         return (flts, env', dsc', csc)
-      BindJoin old_bndr join ->
+      BindJoin old_bndr join@(Join _ body) ->
         assert (isNotTopLevel level) $ do
-          (flts, csc_rhs') <- ensureDupableKont env dsc_rhs csc_rhs
+          (flts, csc_rhs') <- if commandDuplicatesKont body
+                                then ensureDupableKont env dsc_rhs csc_rhs
+                                else return (emptyFloats, csc_rhs)
             -- Note [Call ensureDupableKont around join point]
           (flts', env', csc') <- simplJoinBind (env `augmentFromFloats` flts)
                                                 dsc csc new_bndr dsc_rhs csc_rhs'
@@ -604,10 +606,8 @@ scope, we can just wait until we see a multi-branch case, but join points make
 this trickier: A ret inside a join point might be the only occurrence, but maybe
 not. One solution would be to leverage the occurrence analyzer: It could count
 the rets just like any other name, and we could add an OccInfo (or a placeholder
-binder) to the Compute constructor to hold it. For the time being, we assume
-that any join point needs the continuation to be duplicable. At worst, this
-might cause an extra iteration if mkDupableKont creates bindings that are only
-used once.
+binder) to the Compute constructor to hold it. For the time being, we use the
+utility function duplicatesKont to search through the term each time.
 -}
 
 simplJoin :: SimplEnv -> DataScope -> ControlScope -> InJoin -> SimplM OutJoin
@@ -1304,9 +1304,9 @@ simplKontAfterRules env dsc csc ai (Case case_bndr [Alt _ bndrs rhs])
       -- but the original code in Simplify suggests doing so would be expensive
       
     scrut = argInfoToTerm ai
-simplKontAfterRules env dsc csc ai (Case x alts)
+simplKontAfterRules env dsc csc ai end@(Case x alts)
   = do
-    (flts, csc') <- if length alts > 1
+    (flts, csc') <- if length alts > 1 && endDuplicatesKont end
                        then ensureDupableKont env dsc csc -- we're about to duplicate the context
                        else return (emptyFloats, csc)
     let env'  = env `augmentFromFloats` flts

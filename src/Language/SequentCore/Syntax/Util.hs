@@ -19,6 +19,9 @@ module Language.SequentCore.Syntax.Util (
   
   -- * Free variables
   termFreeVars,
+  
+  -- * Continuation occurence analysis
+  commandDuplicatesKont, endDuplicatesKont,
 
   -- * Uniquification
   uniquifyProgram, uniquifyTerm,
@@ -317,6 +320,42 @@ tryEtaReduce _ _ = Nothing
 
 termFreeVars :: SeqCoreTerm -> VarSet
 termFreeVars = freeVars -- see Language.SequentCore.FVs
+
+-- | Find whether the given command ever duplicates its continuation, i.e.
+-- whether there are multiple occurrences of ret.
+--
+-- TODO A better way of doing this would be to add a binder to Compute so we
+-- could have the occurrence analyzer provide this at little additional cost.
+commandDuplicatesKont :: Command b -> Bool
+endDuplicatesKont     :: End b -> Bool
+(commandDuplicatesKont, endDuplicatesKont)
+  = ( \comm -> evalState (doComm comm) False
+    , \end  -> evalState (doEnd end)   False )
+  where
+    doComm :: Command b -> State Bool Bool
+    doComm (Let bind comm) = (||) <$> doBind bind <*> doComm comm
+    doComm (Jump {})       = return False
+    doComm (Eval _ _ end)  = doEnd end
+    
+    doBind (Rec pairs)   = doPairs pairs
+    doBind (NonRec pair) = doPairs [pair]
+    
+    doPairs []                                 = return False
+    doPairs (BindTerm {} : pairs)              = doPairs pairs
+    doPairs (BindJoin _ (Join _ comm) : pairs) = (||) <$> doComm comm
+                                                      <*> doPairs pairs
+    
+    doEnd Return        = do b <- seenRet; recordRetOcc; return b
+    doEnd (Case _ alts) = doAlts alts
+    
+    doAlts []                   = return False
+    doAlts (Alt _ _ rhs : alts) = (||) <$> doComm rhs <*> doAlts alts
+    
+    seenRet :: State Bool Bool
+    seenRet = get
+    
+    recordRetOcc :: State Bool ()
+    recordRetOcc = put True
 
 uniquifyProgram :: SeqCoreProgram -> SeqCoreProgram
 uniquifyTerm    :: SeqCoreTerm -> SeqCoreTerm
